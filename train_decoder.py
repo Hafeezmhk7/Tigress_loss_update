@@ -232,6 +232,7 @@ def train(
     feature_combination_mode="sum",
     run_prefix="",
     debug=False,
+    enable_image_cross_attn=False,
 ):
 
     # create logdir if not exists
@@ -361,6 +362,7 @@ def train(
         jagged_mode=model_jagged_mode,
         rope=rope,
         prefix_matching=prefix_matching,
+        enable_image_cross_attn=enable_image_cross_attn,
     )
     display_model_summary(model, device)
 

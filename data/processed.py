@@ -177,6 +177,8 @@ class ItemData(Dataset):
             torch.tensor(idx).unsqueeze(0) if not isinstance(idx, torch.Tensor) else idx
         )
         x = self.item_data[idx, :768]
+        x_image = None
+                
         x_brand_id = torch.Tensor(self.item_brand_id[idx])
         
         # if image encoding enabled and filenames are present
@@ -193,6 +195,8 @@ class ItemData(Dataset):
                 x = x + image_features
             elif self.feature_combination_mode == "concat":
                 x = torch.cat([x, image_features], dim=-1)
+            elif self.feature_combination_mode == "cross-attn":
+                x_image = image_features
             else:
                 raise ValueError("Invalid feature combination mode!")
 
@@ -201,6 +205,7 @@ class ItemData(Dataset):
             ids=item_ids,
             ids_fut=-1 * torch.ones_like(item_ids.squeeze(0)),
             x=x,
+            x_image=x_image,
             x_brand_id=x_brand_id,
             x_fut=-1 * torch.ones_like(item_ids.squeeze(0)),
             x_fut_brand_id=-1 * torch.ones_like(item_ids.squeeze(0)),
@@ -380,12 +385,15 @@ class SeqData(Dataset):
         x = self.item_data[item_ids, :768]
         x_fut = self.item_data[item_ids_fut]
         x_fut[item_ids_fut == -1] = -1
+        x_image = None
         
         # use pre-computed image features
         if self.use_image_features and self.image_features is not None:
             valid_item_mask = item_ids >= 0
             if valid_item_mask.any():
                 image_features = self.image_features[item_ids[valid_item_mask]].to(x.device)
+                # convert image features to same dtype as x
+                image_features = image_features.to(x.dtype)
                 if self.feature_combination_mode == "sum":
                     x[valid_item_mask] = x[valid_item_mask] + image_features
                 elif self.feature_combination_mode == "concat":
@@ -398,11 +406,11 @@ class SeqData(Dataset):
                     x_new[valid_item_mask, :x_dim] = x_valid
                     # copy original x
                     # x_new[:, :x_dim] = x
-                    # convert image features to same dtype as x
-                    image_features = image_features.to(x.dtype)
                     # append image features only to valid rows
                     x_new[valid_item_mask, x_dim:] = image_features
                     x = x_new
+                elif self.feature_combination_mode == "cross-attn":
+                    x_image = image_features
                 else:
                     raise ValueError("Invalid feature combination mode!")
         
@@ -414,6 +422,7 @@ class SeqData(Dataset):
             ids=item_ids,
             ids_fut=item_ids_fut,
             x=x,
+            x_image=x_image,
             x_brand_id=-1 * torch.ones_like(item_ids.squeeze(0)),
             x_fut=x_fut,
             x_fut_brand_id=-1 * torch.ones_like(item_ids.squeeze(0)),

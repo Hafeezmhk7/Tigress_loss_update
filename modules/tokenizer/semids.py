@@ -179,6 +179,7 @@ class SemanticIdTokenizer(nn.Module):
             seq_mask=seq_mask,
             token_type_ids=token_type_ids,
             token_type_ids_fut=token_type_ids_fut,
+            x_image=batch.x_image,
         )
 
 

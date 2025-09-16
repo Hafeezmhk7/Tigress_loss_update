@@ -26,7 +26,7 @@ from modules.utils import reset_kv_cache
 from modules.utils import select_columns_per_row
 from ops.triton.jagged import jagged_to_flattened_tensor
 from ops.triton.jagged import padded_to_jagged_tensor
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 from torch import nn
 from torch import Tensor
 from torch.nn import functional as F
@@ -62,6 +62,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
         jagged_mode: bool = True,
         rope=False,
         prefix_matching=False,
+        enable_image_cross_attn=False,
     ) -> None:
         super().__init__()
 
@@ -89,6 +90,8 @@ class EncoderDecoderRetrievalModel(nn.Module):
             self.wpe = nn.Embedding(num_embeddings=max_pos, embedding_dim=embedding_dim)
             self.tte = nn.Embedding(num_embeddings=sem_id_dim, embedding_dim=embedding_dim)
 
+        self.enable_image_cross_attn = enable_image_cross_attn
+        
         self.transformer = (
             TransformerEncoderDecoder(
                 d_in=attn_dim,
@@ -98,6 +101,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
                 encoder_layers=n_layers // 2,
                 decoder_layers=n_layers // 2,
                 rope=self.rope,
+                enable_image_cross_attn=self.enable_image_cross_attn
             )
             if self.jagged_mode
             else nn.Transformer(
@@ -115,7 +119,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
         self.in_proj_context = nn.Linear(embedding_dim, attn_dim, bias=False)
         self.out_proj = nn.Linear(attn_dim, num_embeddings, bias=False)
 
-    def _predict(self, batch: TokenizedSeqBatch) -> AttentionInput:
+    def _predict(self, batch: TokenizedSeqBatch, image_emb: Optional[Tensor] = None) -> AttentionInput:
         user_emb = self.user_id_embedder(batch.user_ids)
         sem_ids_emb = self.sem_id_embedder(batch)
         sem_ids_emb, sem_ids_emb_fut = sem_ids_emb.seq, sem_ids_emb.fut
@@ -173,16 +177,19 @@ class EncoderDecoderRetrievalModel(nn.Module):
             f_mask[~mem_mask] = float("-inf")
 
         transformer_context = self.in_proj_context(self.do(self.norm(input_embedding)))
+        transformer_context_image = self.in_proj_context(self.do(self.norm(image_emb))) if self.enable_image_cross_attn and image_emb is not None else None
         transformer_input = self.in_proj(self.do(self.norm_cxt(input_embedding_fut)))
 
         if self.jagged_mode:
             transformer_output = self.transformer(
                 x=transformer_input,
                 context=transformer_context,
+                context_image=transformer_context_image,
                 padding_mask=batch.seq_mask,
                 jagged=self.jagged_mode,
             )
         else:
+            transformer_context = self.in_proj_context(self.do(self.norm(input_embedding)))
             causal_mask = nn.Transformer.generate_square_subsequent_mask(
                 transformer_input.shape[1]
             )
@@ -218,6 +225,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
             seq_mask=batch.seq_mask,
             token_type_ids=batch.token_type_ids,
             token_type_ids_fut=None,
+            x_image=batch.x_image,
         )
 
         for i in range(self.sem_id_dim):
@@ -321,6 +329,8 @@ class EncoderDecoderRetrievalModel(nn.Module):
                 )
 
                 next_sem_ids = top_k_samples.flatten(end_dim=1)
+                # determine how many children per original batch row we have (beam width used)
+                children_per_example = top_k_samples.shape[1]  # k or k_actual
 
                 input_batch = TokenizedSeqBatch(
                     user_ids=input_batch.user_ids,
@@ -331,6 +341,8 @@ class EncoderDecoderRetrievalModel(nn.Module):
                     ).repeat(next_sem_ids.shape[0], 1),
                     seq_mask=input_batch.seq_mask,
                     token_type_ids=input_batch.token_type_ids,
+                    x_image=(input_batch.x_image.repeat_interleave(children_per_example, dim=0)
+                    if (input_batch.x_image is not None) else None),
                 )
 
                 generated = torch.clone(top_k_samples.detach())
@@ -380,6 +392,8 @@ class EncoderDecoderRetrievalModel(nn.Module):
                     token_type_ids=input_batch.token_type_ids.repeat_interleave(
                         k, dim=0
                     ),
+                    x_image=(input_batch.x_image.repeat_interleave(k, dim=0)
+                    if (input_batch.x_image is not None) else None),
                 )
 
                 generated = top_k_samples.unsqueeze(-1)
@@ -394,7 +408,8 @@ class EncoderDecoderRetrievalModel(nn.Module):
         seq_mask = batch.seq_mask
         B, N = seq_mask.shape
 
-        trnsf_out = self._predict(batch)
+        # pass image emb through if present
+        trnsf_out = self._predict(batch, image_emb=batch.x_image)
 
         if self.training or not self.enable_generation:
             predict_out = self.out_proj(trnsf_out)

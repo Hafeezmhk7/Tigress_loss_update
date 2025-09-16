@@ -30,6 +30,7 @@ class TransformerBlock(nn.Module):
         do_cross_attn: bool = False,
         enable_kv_cache: bool = True,
         rope: bool = False,
+        enable_image_cross_attn: bool = False,
     ) -> None:
         super().__init__()
 
@@ -39,6 +40,7 @@ class TransformerBlock(nn.Module):
         self.qkv_bias = qkv_bias
         self.do_cross_attn = do_cross_attn
         self.enable_kv_cache = enable_kv_cache
+        self.enable_image_cross_attn = enable_image_cross_attn
 
         self.attention = MultiHeadAttention(
             d_in=d_in,
@@ -68,7 +70,7 @@ class TransformerBlock(nn.Module):
         self.do = nn.Dropout(dropout)
 
         if self.do_cross_attn:
-            self.cross_attention = MultiHeadAttention(
+            self.cross_attention_text = MultiHeadAttention(
                 d_in=d_out,
                 d_out=d_out,
                 num_heads=num_heads,
@@ -77,6 +79,16 @@ class TransformerBlock(nn.Module):
                 qkv_bias=qkv_bias,
                 rope=rope,
             )
+            if self.enable_image_cross_attn:
+                self.cross_attention_image = MultiHeadAttention(
+                    d_in=d_out,
+                    d_out=d_out,
+                    num_heads=num_heads,
+                    cross_attn=True,
+                    dropout=dropout,
+                    qkv_bias=qkv_bias,
+                    rope=rope,
+                )
             self.cross_attn_norm = RMSNorm(d_out)
 
     def forward(
@@ -86,6 +98,7 @@ class TransformerBlock(nn.Module):
         padding_mask: Optional[Tensor] = None,
         is_causal: Optional[bool] = True,
         jagged: Optional[bool] = False,
+        image_context: Optional[Tensor] = None,
     ) -> AttentionInput:
         attn_out = x + self.attention(
             self.do(self.attn_norm(x)),
@@ -95,7 +108,7 @@ class TransformerBlock(nn.Module):
             use_cache=not self.training and self.enable_kv_cache,
         )
         if self.do_cross_attn:
-            attn_out = attn_out + self.cross_attention(
+            attn_out_text = self.cross_attention_text(
                 x=self.do(self.cross_attn_norm(x)),
                 x_kv=x_kv,
                 padding_mask=padding_mask,
@@ -103,6 +116,20 @@ class TransformerBlock(nn.Module):
                 jagged=jagged,
                 use_cache=not self.training and self.enable_kv_cache,
             )
+
+            attn_out_image = 0
+            if self.enable_image_cross_attn and image_context is not None:
+                attn_out_image = self.cross_attention_image(
+                    x=self.do(self.cross_attn_norm(x)),
+                    x_kv=image_context,
+                    padding_mask=padding_mask,
+                    is_causal=False,
+                    jagged=jagged,
+                    use_cache=not self.training and self.enable_kv_cache,
+                )
+
+            attn_out = attn_out + attn_out_text + attn_out_image
+
         proj_out = attn_out + self.ff(attn_out)
         return proj_out
 
@@ -128,10 +155,12 @@ class TransformerDecoder(nn.Module, KVCacheOpsMixin):
         do_cross_attn: bool = False,
         enable_kv_cache: bool = True,
         rope: bool = False,
+        enable_image_cross_attn: bool = False,
     ) -> None:
         super().__init__()
 
         self.do_cross_attn = do_cross_attn
+        enable_image_cross_attn=self.enable_image_cross_attn,
 
         self.layers = nn.ModuleList(
             [
@@ -144,6 +173,7 @@ class TransformerDecoder(nn.Module, KVCacheOpsMixin):
                     do_cross_attn=self.do_cross_attn,
                     enable_kv_cache=enable_kv_cache,
                     rope=rope,
+                    enable_image_cross_attn=enable_image_cross_attn,
                 )
                 for _ in range(n_layers)
             ]
@@ -155,6 +185,7 @@ class TransformerDecoder(nn.Module, KVCacheOpsMixin):
         padding_mask: Optional[Tensor] = None,
         is_causal: Optional[bool] = True,
         context: Optional[Tensor] = None,
+        image_context: Optional[Tensor] = None,
         jagged: Optional[bool] = None,
     ) -> AttentionInput:
         for layer in self.layers:
@@ -164,6 +195,7 @@ class TransformerDecoder(nn.Module, KVCacheOpsMixin):
                 padding_mask=padding_mask,
                 is_causal=is_causal,
                 jagged=jagged,
+                image_context=image_context,
             )
         return x
 
@@ -182,9 +214,12 @@ class TransformerEncoderDecoder(nn.Module, KVCacheOpsMixin):
         encoder_layers: int,
         decoder_layers: int,
         rope: bool = False,
+        enable_image_cross_attn: bool = False,
     ) -> None:
         super().__init__()
-
+        
+        self.enable_image_cross_attn = enable_image_cross_attn
+        
         self.encoder = TransformerDecoder(
             d_in=d_in,
             d_out=d_out,
@@ -205,6 +240,7 @@ class TransformerEncoderDecoder(nn.Module, KVCacheOpsMixin):
             do_cross_attn=True,
             enable_kv_cache=False,
             rope=rope,
+            enable_image_cross_attn=self.enable_image_cross_attn,
         )
 
         self.layers = [self.encoder, self.decoder]
@@ -215,21 +251,35 @@ class TransformerEncoderDecoder(nn.Module, KVCacheOpsMixin):
         x: AttentionInput,
         padding_mask: Optional[Tensor] = None,
         context: Optional[Tensor] = None,
+        image_context: Optional[Tensor] = None,
         jagged: Optional[bool] = None,
     ) -> AttentionInput:
         if self.cached_enc_output is None:
-            context = self.encoder(
+            context_memory = self.encoder(
                 context,
                 padding_mask=padding_mask,
                 is_causal=False,
                 context=None,
                 jagged=jagged,
             )
+            image_memory = self.encoder(
+                image_context,
+                padding_mask=padding_mask,
+                is_causal=False,
+                context=None,
+                jagged=jagged,
+            )
             if not self.training:
-                self.cached_enc_output = context
+                self.cached_enc_output = (context_memory, image_memory)
         else:
-            context = self.cached_enc_output
+            context_memory, image_memory = self.cached_enc_output
+
         out = self.decoder(
-            x, padding_mask=None, is_causal=True, context=context, jagged=jagged
+            x,
+            padding_mask=None,
+            is_causal=True,
+            context=context_memory,
+            image_context=image_memory,
+            jagged=jagged,
         )
         return out
