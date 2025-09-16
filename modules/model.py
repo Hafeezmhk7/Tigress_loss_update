@@ -91,6 +91,9 @@ class EncoderDecoderRetrievalModel(nn.Module):
             self.tte = nn.Embedding(num_embeddings=sem_id_dim, embedding_dim=embedding_dim)
 
         self.enable_image_cross_attn = enable_image_cross_attn
+        if self.enable_image_cross_attn:
+            self.image_norm = RMSNorm(attn_dim)
+            self.image_proj = nn.Linear(768, attn_dim)
         
         self.transformer = (
             TransformerEncoderDecoder(
@@ -177,7 +180,19 @@ class EncoderDecoderRetrievalModel(nn.Module):
             f_mask[~mem_mask] = float("-inf")
 
         transformer_context = self.in_proj_context(self.do(self.norm(input_embedding)))
-        transformer_image_context = self.in_proj_context(self.do(self.norm(image_emb))) if self.enable_image_cross_attn and image_emb is not None else None
+        transformer_image_context = None    
+        if self.enable_image_cross_attn and image_emb is not None:
+            image_lengths = torch.full(
+                (image_emb.size(0),),
+                image_emb.size(1),
+                device=image_emb.device,
+                dtype=torch.int64
+            )
+            transformer_image_context = padded_to_jagged_tensor(
+                self.do(self.image_norm(self.image_proj(image_emb))),
+                lengths=image_lengths,
+                max_len=image_emb.size(1)
+            )
         transformer_input = self.in_proj(self.do(self.norm_cxt(input_embedding_fut)))
 
         if self.jagged_mode:
