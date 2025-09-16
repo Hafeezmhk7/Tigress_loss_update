@@ -160,7 +160,6 @@ class TransformerDecoder(nn.Module, KVCacheOpsMixin):
         super().__init__()
 
         self.do_cross_attn = do_cross_attn
-        enable_image_cross_attn=self.enable_image_cross_attn,
 
         self.layers = nn.ModuleList(
             [
@@ -218,8 +217,6 @@ class TransformerEncoderDecoder(nn.Module, KVCacheOpsMixin):
     ) -> None:
         super().__init__()
         
-        self.enable_image_cross_attn = enable_image_cross_attn
-        
         self.encoder = TransformerDecoder(
             d_in=d_in,
             d_out=d_out,
@@ -240,7 +237,7 @@ class TransformerEncoderDecoder(nn.Module, KVCacheOpsMixin):
             do_cross_attn=True,
             enable_kv_cache=False,
             rope=rope,
-            enable_image_cross_attn=self.enable_image_cross_attn,
+            enable_image_cross_attn=enable_image_cross_attn,
         )
 
         self.layers = [self.encoder, self.decoder]
@@ -262,17 +259,13 @@ class TransformerEncoderDecoder(nn.Module, KVCacheOpsMixin):
                 context=None,
                 jagged=jagged,
             )
-            image_memory = self.encoder(
-                image_context,
-                padding_mask=padding_mask,
-                is_causal=False,
-                context=None,
-                jagged=jagged,
-            )
+            # just pass image embeddings directly
+            image_memory = image_context
             if not self.training:
-                self.cached_enc_output = (context_memory, image_memory)
+                self.cached_enc_output = context_memory
         else:
-            context_memory, image_memory = self.cached_enc_output
+            context_memory = self.cached_enc_output
+            image_memory = image_context
 
         out = self.decoder(
             x,

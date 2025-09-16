@@ -177,14 +177,14 @@ class EncoderDecoderRetrievalModel(nn.Module):
             f_mask[~mem_mask] = float("-inf")
 
         transformer_context = self.in_proj_context(self.do(self.norm(input_embedding)))
-        transformer_context_image = self.in_proj_context(self.do(self.norm(image_emb))) if self.enable_image_cross_attn and image_emb is not None else None
+        transformer_image_context = self.in_proj_context(self.do(self.norm(image_emb))) if self.enable_image_cross_attn and image_emb is not None else None
         transformer_input = self.in_proj(self.do(self.norm_cxt(input_embedding_fut)))
 
         if self.jagged_mode:
             transformer_output = self.transformer(
                 x=transformer_input,
                 context=transformer_context,
-                context_image=transformer_context_image,
+                image_context=transformer_image_context,
                 padding_mask=batch.seq_mask,
                 jagged=self.jagged_mode,
             )
@@ -329,9 +329,10 @@ class EncoderDecoderRetrievalModel(nn.Module):
                 )
 
                 next_sem_ids = top_k_samples.flatten(end_dim=1)
-                # determine how many children per original batch row we have (beam width used)
-                children_per_example = top_k_samples.shape[1]  # k or k_actual
 
+                # use parent indices to select original batch images
+                parent_indices = (top_k_indices // n_top_k_candidates).reshape(-1)
+                
                 input_batch = TokenizedSeqBatch(
                     user_ids=input_batch.user_ids,
                     sem_ids=input_batch.sem_ids,
@@ -341,8 +342,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
                     ).repeat(next_sem_ids.shape[0], 1),
                     seq_mask=input_batch.seq_mask,
                     token_type_ids=input_batch.token_type_ids,
-                    x_image=(input_batch.x_image.repeat_interleave(children_per_example, dim=0)
-                    if (input_batch.x_image is not None) else None),
+                    x_image=(input_batch.x_image[parent_indices] if input_batch.x_image is not None else None),
                 )
 
                 generated = torch.clone(top_k_samples.detach())
@@ -383,6 +383,9 @@ class EncoderDecoderRetrievalModel(nn.Module):
                         cache, lengths, max_len=cache.shape[1]
                     )
 
+                # use parent indices to select original batch images
+                parent_indices = (top_k_indices // n_top_k_candidates).reshape(-1)
+                
                 input_batch = TokenizedSeqBatch(
                     user_ids=input_batch.user_ids.repeat_interleave(k, dim=0),
                     sem_ids=input_batch.sem_ids.repeat_interleave(k, dim=0),
@@ -392,8 +395,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
                     token_type_ids=input_batch.token_type_ids.repeat_interleave(
                         k, dim=0
                     ),
-                    x_image=(input_batch.x_image.repeat_interleave(k, dim=0)
-                    if (input_batch.x_image is not None) else None),
+                    x_image=(input_batch.x_image[parent_indices] if input_batch.x_image is not None else None),
                 )
 
                 generated = top_k_samples.unsqueeze(-1)

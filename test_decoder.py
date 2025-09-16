@@ -256,6 +256,8 @@ def test(
     test_dataloader = accelerator.prepare(test_dataloader)
 
     # load rq-vae tokenizer
+    if use_image_features and feature_combination_mode == "concat":
+        vae_input_dim = vae_input_dim * 2
     # tokenizer will create both semantic ID mappings and brand mappings during precompute_corpus_ids
     tokenizer = SemanticIdTokenizer(
         input_dim=vae_input_dim,

@@ -11,7 +11,9 @@ from evaluate.metrics import TopKAccumulator
 from modules.model import EncoderDecoderRetrievalModel
 from modules.scheduler.inv_sqrt import InverseSquareRootScheduler
 from modules.tokenizer.semids import SemanticIdTokenizer
-from modules.utils import compute_debug_metrics, parse_config, display_args, display_metrics, display_model_summary, set_seed
+from modules.utils import (compute_debug_metrics, parse_config, 
+                           display_args, display_metrics, 
+                           display_model_summary, set_seed, collate_seqbatch)
 from torch.optim import AdamW
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 from tqdm import tqdm
@@ -309,7 +311,8 @@ def train(
         device=device,
     )
     train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True)
+        train_dataset, batch_size=batch_size, shuffle=True,
+        collate_fn=collate_seqbatch)
     describe_dataloader(train_dataloader, title="Train DataLoader Summary")
     train_dataloader = cycle(train_dataloader)
 
@@ -325,7 +328,8 @@ def train(
         device=device,
     )
     eval_dataloader = DataLoader(
-        eval_dataset, batch_size=batch_size*2, shuffle=True)
+        eval_dataset, batch_size=batch_size*2, shuffle=True,
+        collate_fn=collate_seqbatch)
     describe_dataloader(eval_dataloader, title="Eval DataLoader Summary")
     train_dataloader, eval_dataloader = accelerator.prepare(
         train_dataloader, eval_dataloader
