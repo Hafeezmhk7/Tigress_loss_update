@@ -79,6 +79,7 @@ class TransformerBlock(nn.Module):
                 qkv_bias=qkv_bias,
                 rope=rope,
             )
+            self.cross_attn_norm = RMSNorm(d_out)
             if self.enable_image_cross_attn:
                 self.cross_attention_image = MultiHeadAttention(
                     d_in=d_out,
@@ -89,7 +90,7 @@ class TransformerBlock(nn.Module):
                     qkv_bias=qkv_bias,
                     rope=rope,
                 )
-            self.cross_attn_norm = RMSNorm(d_out)
+                self.cross_attn_image_norm = RMSNorm(d_out)
 
     def forward(
         self,
@@ -107,20 +108,20 @@ class TransformerBlock(nn.Module):
             jagged=jagged,
             use_cache=not self.training and self.enable_kv_cache,
         )
+        # cross-attention (text first)
         if self.do_cross_attn:
-            attn_out_text = self.cross_attention_text(
-                x=self.do(self.cross_attn_norm(x)),
+            attn_out = attn_out + self.cross_attention_text(
+                x=self.do(self.cross_attn_norm(attn_out)),
                 x_kv=x_kv,
                 padding_mask=padding_mask,
                 is_causal=False,
                 jagged=jagged,
                 use_cache=not self.training and self.enable_kv_cache,
             )
-
-            attn_out_image = 0
+            # cross-attention (image next, conditioned on text-updated state)
             if self.enable_image_cross_attn and image_context is not None:
-                attn_out_image = self.cross_attention_image(
-                    x=self.do(self.cross_attn_norm(x)),
+                attn_out = attn_out + self.cross_attention_image(
+                    x=self.do(self.cross_attn_image_norm(attn_out)),
                     x_kv=image_context,
                     padding_mask=padding_mask,
                     is_causal=False,
@@ -128,20 +129,24 @@ class TransformerBlock(nn.Module):
                     use_cache=not self.training and self.enable_kv_cache,
                 )
 
-            attn_out = attn_out + attn_out_text + attn_out_image
-
+        # feed-forward
         proj_out = attn_out + self.ff(attn_out)
+
         return proj_out
 
     def reset_kv_cache(self):
         self.attention.kv_cache.reset()
         if self.do_cross_attn:
-            self.cross_attention.kv_cache.reset()
+            self.cross_attention_text.kv_cache.reset()
+        if self.enable_image_cross_attn:
+            self.cross_attention_image.kv_cache.reset()
 
     def apply_to_kv_cache(self, fn):
         self.attention.kv_cache.apply(fn)
         if self.do_cross_attn:
-            self.cross_attention.kv_cache.apply(fn)
+            self.cross_attention_text.kv_cache.apply(fn)
+        if self.enable_image_cross_attn:
+            self.cross_attention_image.kv_cache.apply(fn)
 
 
 class TransformerDecoder(nn.Module, KVCacheOpsMixin):

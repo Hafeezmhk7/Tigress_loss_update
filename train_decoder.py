@@ -303,8 +303,7 @@ def train(
         device=device,
     )
     train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True,
-        collate_fn=collate_seqbatch)
+        train_dataset, batch_size=batch_size, shuffle=True)
     describe_dataloader(train_dataloader, title="Train DataLoader Summary")
     train_dataloader = cycle(train_dataloader)
 
@@ -320,8 +319,7 @@ def train(
         device=device,
     )
     eval_dataloader = DataLoader(
-        eval_dataset, batch_size=batch_size*2, shuffle=True,
-        collate_fn=collate_seqbatch)
+        eval_dataset, batch_size=batch_size*2, shuffle=True)
     describe_dataloader(eval_dataloader, title="Eval DataLoader Summary")
     train_dataloader, eval_dataloader = accelerator.prepare(
         train_dataloader, eval_dataloader

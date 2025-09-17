@@ -357,7 +357,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
                     ).repeat(next_sem_ids.shape[0], 1),
                     seq_mask=input_batch.seq_mask,
                     token_type_ids=input_batch.token_type_ids,
-                    x_image=(input_batch.x_image[parent_indices] if input_batch.x_image is not None else None),
+                    x_image=input_batch.x_image,
                 )
 
                 generated = torch.clone(top_k_samples.detach())
@@ -410,7 +410,7 @@ class EncoderDecoderRetrievalModel(nn.Module):
                     token_type_ids=input_batch.token_type_ids.repeat_interleave(
                         k, dim=0
                     ),
-                    x_image=(input_batch.x_image[parent_indices] if input_batch.x_image is not None else None),
+                    x_image=(input_batch.x_image.repeat_interleave(k, dim=0) if input_batch.x_image is not None else None)
                 )
 
                 generated = top_k_samples.unsqueeze(-1)

@@ -410,7 +410,12 @@ class SeqData(Dataset):
                     x_new[valid_item_mask, x_dim:] = image_features
                     x = x_new
                 elif self.feature_combination_mode == "cross-attn":
-                    x_image = image_features
+                    x_image = torch.zeros(self.max_seq_len, image_features.shape[1], device=x.device, dtype=x.dtype)
+                    # positions of valid items
+                    valid_idx = valid_item_mask.nonzero(as_tuple=True)[0]
+                    if len(valid_idx) > 0:
+                        # copy image features into the correct positions
+                        x_image[valid_idx] = image_features
                 else:
                     raise ValueError("Invalid feature combination mode!")
         
