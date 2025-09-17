@@ -10,7 +10,9 @@ from data.utils import batch_to, cycle, next_batch, describe_dataloader
 from evaluate.metrics import TopKAccumulator, SemanticCoverageAccumulator, UserFairnessAccumulator, compute_user_activity_groups
 from modules.model import EncoderDecoderRetrievalModel
 from modules.tokenizer.semids import SemanticIdTokenizer
-from modules.utils import compute_debug_metrics, parse_config, display_args, display_metrics, display_model_summary, set_seed
+from modules.utils import (compute_debug_metrics, parse_config, display_args, 
+                           display_metrics, display_model_summary, set_seed,
+                           clamp_ids)
 from torch.optim import AdamW
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 from tqdm import tqdm
@@ -50,15 +52,6 @@ def create_item_brand_mapping(tokenizer, item_dataset):
         logger.warning(f"Could not create item-brand mapping: {e}")
     
     return item_brand_mapping
-
-def clamp_ids(tokenized_data, valid_max):
-    valid_sem_id_min = tokenized_data.sem_ids.min().item()
-    valid_sem_id_fut_min = tokenized_data.sem_ids_fut.min().item()
-    tokenized_data = tokenized_data._replace(
-        sem_ids=torch.clamp(tokenized_data.sem_ids, min=valid_sem_id_min, max=valid_max),
-        sem_ids_fut=torch.clamp(tokenized_data.sem_ids_fut, min=valid_sem_id_fut_min, max=valid_max)
-    )
-    return tokenized_data
 
 
 def evaluate(model, test_dataloader, device, tokenizer, 

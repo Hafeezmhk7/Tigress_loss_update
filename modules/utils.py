@@ -242,3 +242,16 @@ def collate_seqbatch(batch):
         x_brand_id=x_brand_id,
         seq_mask=seq_mask
     )
+
+
+def clamp_ids(tokenized_data, valid_max):
+    """
+    Clamp overflowing semantic ids
+    """
+    valid_sem_id_min = tokenized_data.sem_ids.min().item()
+    valid_sem_id_fut_min = tokenized_data.sem_ids_fut.min().item()
+    tokenized_data = tokenized_data._replace(
+        sem_ids=torch.clamp(tokenized_data.sem_ids, min=valid_sem_id_min, max=valid_max),
+        sem_ids_fut=torch.clamp(tokenized_data.sem_ids_fut, min=valid_sem_id_fut_min, max=valid_max)
+    )
+    return tokenized_data
