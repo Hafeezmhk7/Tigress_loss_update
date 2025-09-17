@@ -9,7 +9,7 @@ import gin
 import torch
 import random
 import numpy as np
-from data.schemas import TokenizedSeqBatch
+from data.schemas import TokenizedSeqBatch, SeqBatch
 from einops import rearrange
 from torch import Tensor
 import logging
@@ -19,6 +19,7 @@ from rich.table import Table
 from rich.console import Console
 import torch
 from torchinfo import summary
+from torch.nn.utils.rnn import pad_sequence
 
 
 # fetch logger
@@ -207,3 +208,50 @@ def display_model_summary(model, input_shape=None, title="Model Summary", device
 
     console = Console()
     console.print(table)
+
+def collate_seqbatch(batch):
+    """
+    Collate a batch of SeqBatch objects, padding variable-length x_image if needed.
+    """
+    # user_ids, ids, etc.
+    user_ids = torch.stack([b.user_ids for b in batch])
+    ids = torch.stack([b.ids for b in batch])
+    ids_fut = torch.stack([b.ids_fut for b in batch])
+    x = torch.stack([b.x for b in batch])
+    x_brand_id = torch.stack([b.x_brand_id for b in batch])
+    x_fut = torch.stack([b.x_fut for b in batch])
+    x_fut_brand_id = torch.stack([b.x_fut_brand_id for b in batch])
+    seq_mask = torch.stack([b.seq_mask for b in batch])
+
+    # handle variable-length x_image
+    x_image_list = [b.x_image for b in batch if b.x_image is not None]
+    if x_image_list:
+        # pad to max length
+        x_image = pad_sequence(x_image_list, batch_first=True)
+    else:
+        x_image = None
+
+    return SeqBatch(
+        user_ids=user_ids,
+        ids=ids,
+        ids_fut=ids_fut,
+        x=x,
+        x_image=x_image,
+        x_fut_brand_id=x_fut_brand_id,
+        x_fut=x_fut,
+        x_brand_id=x_brand_id,
+        seq_mask=seq_mask
+    )
+
+
+def clamp_ids(tokenized_data, valid_max):
+    """
+    Clamp overflowing semantic ids
+    """
+    valid_sem_id_min = tokenized_data.sem_ids.min().item()
+    valid_sem_id_fut_min = tokenized_data.sem_ids_fut.min().item()
+    tokenized_data = tokenized_data._replace(
+        sem_ids=torch.clamp(tokenized_data.sem_ids, min=valid_sem_id_min, max=valid_max),
+        sem_ids_fut=torch.clamp(tokenized_data.sem_ids_fut, min=valid_sem_id_fut_min, max=valid_max)
+    )
+    return tokenized_data

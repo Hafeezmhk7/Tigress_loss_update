@@ -1,4 +1,4 @@
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 from torch import Tensor
 
 FUT_SUFFIX = "_fut"
@@ -13,6 +13,7 @@ class SeqBatch(NamedTuple):
     x_fut: Tensor
     x_brand_id: Tensor
     seq_mask: Tensor
+    x_image: Optional[Tensor] = None
 
 
 class TokenizedSeqBatch(NamedTuple):
@@ -22,3 +23,4 @@ class TokenizedSeqBatch(NamedTuple):
     seq_mask: Tensor
     token_type_ids: Tensor
     token_type_ids_fut: Tensor
+    x_image: Optional[Tensor] = None

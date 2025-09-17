@@ -11,7 +11,10 @@ from evaluate.metrics import TopKAccumulator
 from modules.model import EncoderDecoderRetrievalModel
 from modules.scheduler.inv_sqrt import InverseSquareRootScheduler
 from modules.tokenizer.semids import SemanticIdTokenizer
-from modules.utils import compute_debug_metrics, parse_config, display_args, display_metrics, display_model_summary, set_seed
+from modules.utils import (compute_debug_metrics, parse_config, 
+                           display_args, display_metrics, 
+                           display_model_summary, set_seed, 
+                           collate_seqbatch, clamp_ids)
 from torch.optim import AdamW
 from torch.utils.data import BatchSampler, DataLoader, RandomSampler
 from tqdm import tqdm
@@ -32,15 +35,6 @@ if not logger.hasHandlers():
     logger.addHandler(handler)
     logger.propagate = False
 
-
-def clamp_ids(tokenized_data, valid_max):
-    valid_sem_id_min = tokenized_data.sem_ids.min().item()
-    valid_sem_id_fut_min = tokenized_data.sem_ids_fut.min().item()
-    tokenized_data = tokenized_data._replace(
-        sem_ids=torch.clamp(tokenized_data.sem_ids, min=valid_sem_id_min, max=valid_max),
-        sem_ids_fut=torch.clamp(tokenized_data.sem_ids_fut, min=valid_sem_id_fut_min, max=valid_max)
-    )
-    return tokenized_data
 
 def train_iteration(model, optimizer, tokenizer,
                     accelerator, lr_scheduler, metrics_accumulator,
@@ -232,6 +226,7 @@ def train(
     feature_combination_mode="sum",
     run_prefix="",
     debug=False,
+    enable_image_cross_attn=False,
 ):
 
     # create logdir if not exists
@@ -308,7 +303,8 @@ def train(
         device=device,
     )
     train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True)
+        train_dataset, batch_size=batch_size, shuffle=True,
+        collate_fn=collate_seqbatch)
     describe_dataloader(train_dataloader, title="Train DataLoader Summary")
     train_dataloader = cycle(train_dataloader)
 
@@ -324,7 +320,8 @@ def train(
         device=device,
     )
     eval_dataloader = DataLoader(
-        eval_dataset, batch_size=batch_size*2, shuffle=True)
+        eval_dataset, batch_size=batch_size*2, shuffle=True,
+        collate_fn=collate_seqbatch)
     describe_dataloader(eval_dataloader, title="Eval DataLoader Summary")
     train_dataloader, eval_dataloader = accelerator.prepare(
         train_dataloader, eval_dataloader
@@ -361,6 +358,7 @@ def train(
         jagged_mode=model_jagged_mode,
         rope=rope,
         prefix_matching=prefix_matching,
+        enable_image_cross_attn=enable_image_cross_attn,
     )
     display_model_summary(model, device)
 
