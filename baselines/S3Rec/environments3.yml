@@ -1,0 +1,11 @@
+name: s3rec-env
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+dependencies:
+  - python=3.9
+  - pytorch=1.13.1
+  - numpy
+  - scipy
+  - tqdm
