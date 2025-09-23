@@ -12,9 +12,12 @@ from modules.quantize import Quantize
 from modules.quantize import QuantizeForwardMode
 from huggingface_hub import PyTorchModelHubMixin
 from typing import List
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 from torch import nn
 from torch import Tensor
+from modules.transformer.attention import MultiHeadAttention
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 
 # fetch logger
 logger = logging.getLogger("recsys_logger")
@@ -50,6 +53,9 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         n_layers: int = 3,
         commitment_weight: float = 0.25,
         n_cat_features: int = 18,
+        use_cross_attn: bool = False,
+        attn_heads: int = 8,
+        mixed_precision_type: str = "fp16",
     ) -> None:
         self._config = locals()
 
@@ -97,6 +103,19 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
             if n_cat_features != 0
             else ReconstructionLoss()
         )
+        
+        self.use_cross_attn = use_cross_attn
+        if self.use_cross_attn:
+            # project CLIP 768 -> encoder output dim
+            self.img_proj = nn.Linear(input_dim, embed_dim)
+            self.img_proj = self.img_proj.to(dtype=torch.float16 if mixed_precision_type=="fp16" else torch.bfloat16)
+            self.cross_attn = MultiHeadAttention(
+                d_in=embed_dim,
+                d_out=embed_dim,
+                num_heads=attn_heads,
+                cross_attn=True,
+                dropout=0.1,
+            )
 
     @cached_property
     def config(self) -> dict:
@@ -111,14 +130,23 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         self.load_state_dict(state["model"])
         logger.info(f"Loaded RQ-VAE Model | Iteration {state['iteration']}")
 
-    def encode(self, x: Tensor) -> Tensor:
-        return self.encoder(x)
+    def encode(self, x: Tensor, x_cross: Optional[Tensor] = None) -> Tensor:
+        h = self.encoder(x)
+        if self.use_cross_attn and x_cross is not None:
+            # make sure x_cross and the linear module are on the same device and dtype as h
+            x_cross = x_cross.to(h.device, dtype=h.dtype)
+            # cast the module dynamically to h.dtype
+            x_cross = self.img_proj.to(dtype=h.dtype)(x_cross)
+            h = h + self.cross_attn(x=h, x_kv=x_cross, jagged=True).squeeze(1)
+            
+        return h
 
     def decode(self, x: Tensor) -> Tensor:
         return self.decoder(x)
 
-    def get_semantic_ids(self, x: Tensor, gumbel_t: float = 0.001) -> RqVaeOutput:
-        res = self.encode(x)
+    def get_semantic_ids(self, x: Tensor, x_image: Optional[Tensor] = None, 
+                         gumbel_t: float = 0.001) -> RqVaeOutput:
+        res = self.encode(x, x_cross=x_image)
 
         quantize_loss = 0
         embs, residuals, sem_ids = [], [], []
@@ -141,8 +169,8 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
 
     @torch.compile(mode="reduce-overhead")
     def forward(self, batch: SeqBatch, gumbel_t: float) -> RqVaeComputedLosses:
-        x = batch.x
-        quantized = self.get_semantic_ids(x, gumbel_t)
+        x, x_image = batch.x, batch.x_image
+        quantized = self.get_semantic_ids(x, x_image=x_image, gumbel_t=gumbel_t)
         embs, residuals = quantized.embeddings, quantized.residuals
         x_hat = self.decode(embs.sum(axis=-1))
         x_hat = torch.cat(

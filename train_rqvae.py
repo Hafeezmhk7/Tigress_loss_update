@@ -231,6 +231,8 @@ def train(
     use_image_features=False,
     feature_combination_mode="sum",
     run_prefix="",
+    use_cross_attn = False,
+    attn_heads = 8,
     debug=False,
 ):
 
@@ -332,6 +334,9 @@ def train(
         n_layers=vae_n_layers,
         n_cat_features=vae_n_cat_feats,
         commitment_weight=commitment_weight,
+        use_cross_attn=use_cross_attn,
+        attn_heads=attn_heads,
+        mixed_precision_type=mixed_precision_type,
     )
     display_model_summary(model, device)
 
