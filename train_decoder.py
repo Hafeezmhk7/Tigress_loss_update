@@ -227,6 +227,7 @@ def train(
     run_prefix="",
     debug=False,
     enable_image_cross_attn=False,
+    use_rqvae_cross_attn=False,
 ):
 
     # create logdir if not exists
@@ -338,6 +339,9 @@ def train(
         rqvae_weights_path=pretrained_rqvae_path,
         rqvae_codebook_normalize=vae_codebook_normalize,
         rqvae_sim_vq=vae_sim_vq,
+        use_cross_attn=use_rqvae_cross_attn,
+        attn_heads=attn_heads,
+        mixed_precision_type=mixed_precision_type,
     )
     tokenizer = accelerator.prepare(tokenizer)
     tokenizer.precompute_corpus_ids(item_dataset)

@@ -38,6 +38,9 @@ class SemanticIdTokenizer(nn.Module):
         rqvae_weights_path: Optional[str] = None,
         rqvae_codebook_normalize: bool = False,
         rqvae_sim_vq: bool = False,
+        use_cross_attn: bool = False,
+        attn_heads: int = 8,
+        mixed_precision_type: str = "fp16",
     ) -> None:
         super().__init__()
 
@@ -52,6 +55,9 @@ class SemanticIdTokenizer(nn.Module):
             n_layers=n_layers,
             n_cat_features=n_cat_feats,
             commitment_weight=commitment_weight,
+            use_cross_attn=use_cross_attn,
+            attn_heads=attn_heads,
+            mixed_precision_type=mixed_precision_type,
         )
 
         if rqvae_weights_path is not None:
