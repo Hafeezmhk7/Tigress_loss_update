@@ -83,9 +83,9 @@ sbatch run job_scripts/test_decoder.job
 
 
 ## Weights & Biases Results Dashboard
-- RQ-VAE Training Report: [link](https://wandb.ai/RecSys-UvA/rq-vae-training/reports/RQ-VAE-Training-Report--VmlldzoxMzM2NjQ5MA?accessToken=ycktjvkde9hfnfv7gz7zlkcjqtsl4pr2c1x3sy65megn49yebpi9nu3vwjzwcpt3)
-- Decoder Training and Testing Report: [link](https://api.wandb.ai/links/RecSys-UvA/ofxtg8fq)
-- Decoder Testing Only Report: [link](https://wandb.ai/RecSys-UvA/gen-ir-decoder-testing/reports/Decoder-Testing-Report--VmlldzoxMzM2NjQ1Mw?accessToken=r3cvpvonokw0kbslg5bt10kht3yf8chxhk7gjkpi2dt56wwaw9mstsn9qgwo2o96)
+- RQ-VAE Training Report: `[redacted]`
+- Decoder Training and Testing Report: `[redacted]`
+- Decoder Testing Only Report: `[redacted]`
 
 ## High-Level Directory Structure
 
@@ -143,6 +143,9 @@ We compare against three sequential recommendation models for reproducibility an
 - **[TIGER [1]](https://github.com/EdoardoBotta/RQ-VAE-Recommender):** A generative retrieval framework that learns to generate relevant item identifiers directly from user context, integrating a language modeling paradigm into recommendation tasks. Used as the main baseline to evaluate our proposed TIGRESS model.
 
 
+- **[GRU4Rec [8]](https://github.com/hidasib/GRU4Rec):**
+A recurrent neural network-based sequential recommender that models user interaction sequences using Gated Recurrent Units (GRUs). It captures short-term session dynamics and predicts the next likely item by updating hidden states across interactions.
+
 ## References
 
 [1] Rajput, S., Mehta, N., Singh, A., Keshavan, R.H., Vu, T., Heldt, L., Hong, L., Tay, Y., Tran, V.Q., Samost, J., Kula, M., Chi, E.H., Sathiamoorthy, M.: Recommender systems with generative retrieval (2023), https://arxiv.org/abs/2305.05065
@@ -158,3 +161,5 @@ We compare against three sequential recommendation models for reproducibility an
 [6] Liu, H., Wei, Y., Song, X., Guan, W., Li, Y.F., Nie, L.: Mmgrec: Multimodal generative recommendation with transformer model (2024), https://arxiv.org/abs/ 2404.16555  
 
 [7] Zhai, J., Mai, Z.F., Wang, C.D., Yang, F., Zheng, X., Li, H., Tian, Y.: Multimodal quantitative language for generative recommendation (2025), https://arxiv.org/ abs/2504.05314
+
+[8] Hidasi, B., Karatzoglou, A., Baltrunas, L., Tikk, D.: Session-based recom- mendations with recurrent neural networks (2016), URL https://arxiv.org/ abs/1511.06939
