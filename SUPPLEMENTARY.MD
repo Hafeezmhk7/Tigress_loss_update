@@ -46,3 +46,16 @@ Comparison of TIGER and TIGRESS with two fusion strategies (Addition and Concate
 Comparison of TIGER and TIGRESS with two fusion strategies on diversity metrics at cutoffs 5 and 10 across Amazon (2014) and Amazon (2023) categories.
 
 ![Diversity Metrics](assets/diversity.png)
+
+### Training Efficiency and Resource Usage
+
+- **Runtime:** Cross-Attention fusion incurs higher training times compared to simple fusion strategies (Addition, Concatenation), while text-only models are fastest.
+
+- **CPU Memory:** Concatenation slightly increases CPU memory use compared to Addition; Cross-Attention uses more. Text-only models remain lightweight.
+
+- **GPU Power:** Power consumption scales with model complexity and fusion strategy.
+
+- **CPU Usage:** All models maintain moderate CPU utilization, with small increases for more complex fusion strategies.
+
+
+![Resources Utilization](assets/system_resources.png)
