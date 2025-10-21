@@ -3,16 +3,16 @@
 This supplementary material provides detailed experimental results for the TIGER and TIGRESS models across multiple metrics, datasets, and fusion strategies. We include:  
 
 - **Reproducibility**: Comparison of original published results with our reproduced results on Amazon (2014) for multiple sequential recommendation models.  
+- **Baselines**: Comparisons against standard sequential recommendation models.  
 - **Recall and NDCG**: Performance evaluation at cutoffs 5 and 10 on Amazon (2014) and Amazon (2023), including TIGER and TIGRESS with Addition, Concatenation, and Cross-Attention Late Fusion strategies.  
 - **Fairness**: Metrics evaluating the distributional equity of recommendations across product categories.  
 - **Diversity**: Metrics capturing item and brand coverage to assess recommendation variety.  
-- **Baselines**: Comparisons against standard sequential recommendation models.  
 
 The following sections summarize these results with figures derived from the saved tables.
 
 ### Reproducibility of Original Experiments
 
-Comparison of original published results with our reproduced results on Amazon (2014) for multiple sequential recommendation models.
+Comparison of original published results (from the TIGER paper) with our reproduced results on Amazon (2014) for multiple sequential recommendation models.
 
 ![Reproducibility Summary](assets/reproducibility.png)
 
