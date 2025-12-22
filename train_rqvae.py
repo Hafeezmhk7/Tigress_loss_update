@@ -8,6 +8,7 @@ from accelerate import Accelerator
 from data.processed import ItemData, RecDataset
 from data.utils import batch_to, cycle, next_batch, describe_dataloader
 from modules.rqvae import RqVae
+from modules.constrastive_rqvae import ContrastiveMultimodalRqVae
 from modules.quantize import QuantizeForwardMode
 from modules.tokenizer.semids import SemanticIdTokenizer
 from modules.utils import parse_config, display_args, display_metrics, display_model_summary
@@ -32,31 +33,15 @@ if not logger.hasHandlers():
     
     
 def train_iteration(
-        model,
-        optimizer,
-        tokenizer,
-        train_dataloader,
-        eval_dataloader,
-        index_dataset,
-        vae_codebook_size,
-        accelerator,
-        gradient_accumulate_every,
-        device,
-        iteration,
-        iterations,
-        losses,
-        use_kmeans_init,
-        train_dataset,
-        vae_n_layers,
-        wandb_logging,
-        log_every,
-        eval_every,
-        save_model_every,
-        log_dir,
-        pbar,
-        t=0.2,
-    ): 
-    # set model to training mode
+    model, optimizer, tokenizer, train_dataloader, eval_dataloader, 
+    index_dataset, vae_codebook_size, accelerator,
+    gradient_accumulate_every, device, iteration, iterations,
+    losses, use_kmeans_init, train_dataset, 
+    vae_n_layers, wandb_logging, log_every,
+    eval_every, save_model_every,
+    log_dir, pbar,
+    t=0.2,
+):
     model.train()
     # set variables
     total_loss = 0
@@ -77,34 +62,30 @@ def train_iteration(
             loss = model_output.loss / gradient_accumulate_every
             total_loss += loss
 
-    # autograd stuff
+    # autograd
     accelerator.backward(total_loss)
     optimizer.step()
     accelerator.wait_for_everyone()
 
-    # pbar metrics update
-    losses[0].append(total_loss.cpu().item())
-    losses[1].append(model_output.reconstruction_loss.cpu().item())
-    losses[2].append(model_output.rqvae_loss.cpu().item())
-    losses[0] = losses[0][-1000:]
-    losses[1] = losses[1][-1000:]
-    losses[2] = losses[2][-1000:]
-    
+    # dynamically handle losses/metrics
+    if not losses:  # initialize if empty
+        metric_names = [k for k in model_output._fields]  # assumes namedtuple
+        for _ in metric_names:
+            losses.append([])
+
+    for i, name in enumerate(model_output._fields):
+        val = getattr(model_output, name)
+        if torch.is_tensor(val):
+            val = val.cpu().item()
+        losses[i].append(val)
+        losses[i] = losses[i][-1000:]  # keep last 1000
+
+    # update pbar dynamically
     if iteration % 100 == 0:
-        print_loss = np.mean(losses[0])
-        print_rec_loss = np.mean(losses[1])
-        print_vae_loss = np.mean(losses[2])
+        desc = ", ".join(f"{name}: {np.mean(losses[i]):.4f}" for i, name in enumerate(model_output._fields))
+        pbar.set_description(desc)
 
-        pbar.set_description(
-            f"loss: {print_loss:.4f}, rl: {print_rec_loss:.4f}, vl: {print_vae_loss:.4f}"
-        )
-
-    # autograd
-    accelerator.wait_for_everyone()
-    optimizer.step()
-    accelerator.wait_for_everyone()
-
-    # compute logs depending on training model_output here to avoid cuda graph overwrite from eval graph.
+    # compute logs depending on training model_output
     if accelerator.is_main_process:
         if ((iteration + 1) % log_every == 0 or iteration + 1 == iterations):
             emb_norms_avg = model_output.embs_norm.mean(axis=0)
@@ -114,33 +95,34 @@ def train_iteration(
             }
             train_log = {
                 "train/learning_rate": optimizer.param_groups[0]["lr"],
-                "train/total_loss": total_loss.cpu().item(),
-                "train/reconstruction_loss": model_output.reconstruction_loss.cpu().item(),
-                "train/rqvae_loss": model_output.rqvae_loss.cpu().item(),
                 "train/temperature": t,
                 "train/p_unique_ids": model_output.p_unique_ids.cpu().item(),
                 **emb_norms_avg_log,
             }
-            # print train metrics
+            # add all dynamic metrics
+            for i, name in enumerate(model_output._fields):
+                val = getattr(model_output, name)
+                if torch.is_tensor(val):
+                    val = val.cpu().item()
+                train_log[f"train/{name}"] = val
+
             display_metrics(metrics=train_log, title="Training Metrics")
-            
-            # log metrics
             if wandb_logging:
-                wandb.log(train_log, step=iteration+1)
-    
-    # evaluate model
+                wandb.log(train_log, step=iteration + 1)
+
+    # evaluation and checkpoint
     if accelerator.is_main_process:
         # save model checkpoint
         if ((iteration + 1) % save_model_every == 0 or (iteration + 1) == iterations):
             state = {
-                "iteration": iteration+1,
+                "iteration": iteration + 1,
                 "model": model.state_dict(),
                 "model_config": model.config,
                 "optimizer": optimizer.state_dict(),
             }
-            torch.save(state, f"{log_dir}/checkpoint_{iteration+1}.pt")
+            torch.save(state, f"{log_dir}/checkpoint_{iteration + 1}.pt")
             logger.info(f'Iteration {iteration}: Model saved.')
-            
+
         if ((iteration + 1) % eval_every == 0 or (iteration + 1) == iterations):
             # start evaluation 
             logger.info('Evaluation Started!')
@@ -150,51 +132,45 @@ def train_iteration(
             tokenizer.reset()
             corpus_ids = tokenizer.precompute_corpus_ids(index_dataset)
             max_duplicates = corpus_ids[:, -1].max() / corpus_ids.shape[0]
-            _, counts = torch.unique(
-                corpus_ids[:, :-1], dim=0, return_counts=True
-            )
+            _, counts = torch.unique(corpus_ids[:, :-1], dim=0, return_counts=True)
             p = counts / corpus_ids.shape[0]
             rqvae_entropy = -(p * torch.log(p)).sum()
 
             for cid in range(vae_n_layers):
                 _, counts = torch.unique(corpus_ids[:, cid], return_counts=True)
-                eval_log[f"eval/codebook_usage_{cid}"] = (
-                    len(counts) / vae_codebook_size
-                )
+                eval_log[f"eval/codebook_usage_{cid}"] = len(counts) / vae_codebook_size
             eval_log["eval/rqvae_entropy"] = rqvae_entropy.cpu().item()
             eval_log["eval/max_id_duplicates"] = max_duplicates.cpu().item()
-            
+
             # print eval metrics
             display_metrics(metrics=eval_log, title="Evaluation Metrics")
             
             # log metrics
             if wandb_logging:
-                wandb.log(eval_log, step=iteration+1)
+                wandb.log(eval_log, step=iteration + 1)
                 
             model.train()  # switch back to training mode after validation
-
-    return
 
 
 def evaluate(model, eval_dataloader, device, t=0.2):
     model.eval()
-    eval_losses = [[], [], []]
-    pbar = tqdm(eval_dataloader, desc=f"Eval")
+    metrics_dict = {name: [] for name in model._fields}
+
+    pbar = tqdm(eval_dataloader, desc="Eval")
     with torch.no_grad():
         for batch in pbar:
             data = batch_to(batch, device)
-            model_output = model(data, gumbel_t=t)
-            eval_losses[0].append(model_output.loss.cpu().item())
-            eval_losses[1].append(model_output.reconstruction_loss.cpu().item())
-            eval_losses[2].append(model_output.rqvae_loss.cpu().item())
+            out = model(data, gumbel_t=t)
 
-    eval_losses = np.array(eval_losses).mean(axis=-1)
-    
-    return {
-        "eval/total_loss": eval_losses[0],
-        "eval/reconstruction_loss": eval_losses[1],
-        "eval/rqvae_loss": eval_losses[2],
-    }
+            for name in out._fields:
+                val = getattr(out, name)
+                if torch.is_tensor(val):
+                    val = val.cpu().item()
+                metrics_dict[name].append(val)
+
+    # compute mean for each metric
+    eval_metrics = {f"eval/{k}": np.mean(v) for k, v in metrics_dict.items()}
+    return eval_metrics
 
 
 @gin.configurable
@@ -322,11 +298,12 @@ def train(
     # load model
     if use_image_features and feature_combination_mode == "concat":
         vae_input_dim = vae_input_dim * 2
-    model = RqVae(
-        input_dim=vae_input_dim,
-        embed_dim=vae_embed_dim,
-        hidden_dims=vae_hidden_dims,
-        codebook_size=vae_codebook_size,
+        
+    model = ContrastiveMultimodalRqVae(
+        input_dim=vae_input_dim,                     
+        embed_dim=vae_embed_dim,                     
+        hidden_dims=vae_hidden_dims,                
+        codebook_size=vae_codebook_size,            
         codebook_kmeans_init=use_kmeans_init and pretrained_rqvae_path is None,
         codebook_normalize=vae_codebook_normalize,
         codebook_sim_vq=vae_sim_vq,
@@ -337,7 +314,27 @@ def train(
         use_cross_attn=use_cross_attn,
         attn_heads=attn_heads,
         mixed_precision_type=mixed_precision_type,
+        use_contrastive=True,                       
+        contrastive_weight=0.5,                     
+        recon_contrastive_weight=0.5,               
     )
+
+    # model = RqVae(
+    #     input_dim=vae_input_dim,
+    #     embed_dim=vae_embed_dim,
+    #     hidden_dims=vae_hidden_dims,
+    #     codebook_size=vae_codebook_size,
+    #     codebook_kmeans_init=use_kmeans_init and pretrained_rqvae_path is None,
+    #     codebook_normalize=vae_codebook_normalize,
+    #     codebook_sim_vq=vae_sim_vq,
+    #     codebook_mode=vae_codebook_mode,
+    #     n_layers=vae_n_layers,
+    #     n_cat_features=vae_n_cat_feats,
+    #     commitment_weight=commitment_weight,
+    #     use_cross_attn=use_cross_attn,
+    #     attn_heads=attn_heads,
+    #     mixed_precision_type=mixed_precision_type,
+    # )
     display_model_summary(model, device)
 
     # setup optimizer
@@ -378,7 +375,9 @@ def train(
         total=start_iter + iterations,
         disable=not accelerator.is_main_process,
     ) as pbar:
-        losses = [[], [], []]
+        # list of lists, one per metric dynamically
+        losses = []
+
         for iter_ in range(start_iter, start_iter + 1 + iterations):
             t = 0.2
             train_iteration(

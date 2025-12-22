@@ -178,7 +178,6 @@ class ItemData(Dataset):
         )
         x = self.item_data[idx, :768]
         x_image = None
-                
         x_brand_id = torch.Tensor(self.item_brand_id[idx])
         
         # if image encoding enabled and filenames are present
@@ -188,15 +187,19 @@ class ItemData(Dataset):
                 image_features = self.image_features[idx:idx+1].to(x.device)
             else:
                 image_features = self.image_features[idx].to(x.device)
-            
-            # add image features to x
+
+            # always keep a copy for contrastive learning
+            x_image = image_features
+
+            # Fuse for reconstruction
             if self.feature_combination_mode == "sum":
                 x = x.unsqueeze(0) if x.dim() == 1 else x
                 x = x + image_features
             elif self.feature_combination_mode == "concat":
                 x = torch.cat([x, image_features], dim=-1)
-            elif self.feature_combination_mode == "cross-attn":
-                x_image = image_features
+            elif self.feature_combination_mode == "contrastive":
+                # x_image is already set
+                pass
             else:
                 raise ValueError("Invalid feature combination mode!")
 
