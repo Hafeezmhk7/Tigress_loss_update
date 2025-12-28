@@ -52,17 +52,17 @@ train.attn_heads=8
 #train.use_multiscale_infonce=True
 #train.use_cost_infonce=False
 #train.infonce_temperature=0.07
-#train.encoder_infonce_weight=0.1
+#rain.encoder_infonce_weight=0.3
 #train.multiscale_infonce_weight=0.3
 #train.encoder_dropout_rate=0.1
 
 # ===== EXPERIMENT 4: Multi-Scale + CoST InfoNCE =====
 train.use_encoder_infonce=False
-train.use_multiscale_infonce=False
+train.use_multiscale_infonce=True
 train.use_cost_infonce=True
-train.infonce_temperature=0.07
-train.multiscale_infonce_weight=0.3
-train.cost_infonce_weight=0.2
+train.infonce_temperature=0.01
+train.multiscale_infonce_weight=0.5
+train.cost_infonce_weight=0.5
 
 # ===== EXPERIMENT 5: Full Triple-Stage (RECOMMENDED) =====
 #train.use_encoder_infonce=True

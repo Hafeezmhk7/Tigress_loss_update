@@ -158,7 +158,7 @@ test.prefix_matching=False # todo: fix
 #train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766752320/checkpoint_400000.pt"
 
 # Multi Scale InfoNCE
-#train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766750552/checkpoint_400000.pt"
+train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766750552/checkpoint_400000.pt"
 
 # No Modifications in the Tiger Loss
-train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766749068/checkpoint_400000.pt"
+#train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766749068/checkpoint_400000.pt"

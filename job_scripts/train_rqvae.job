@@ -16,5 +16,9 @@ module load CUDA/12.6.0
 
 source activate rq-vae
 
+# ===== SET WANDB API KEY =====
+export WANDB_API_KEY="0d9895af249ee18e4fa141e8a2350e0f4adb920f"  # Replace with your actual key
+# ===== END =====
+
 # train rq-vae
 python train_rqvae.py configs/rqvae_amazon.gin

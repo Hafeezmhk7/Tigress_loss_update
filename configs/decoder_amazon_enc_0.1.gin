@@ -161,4 +161,7 @@ test.prefix_matching=False # todo: fix
 #train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766750552/checkpoint_400000.pt"
 
 # No Modifications in the Tiger Loss
-train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766749068/checkpoint_400000.pt"
+#train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766749068/checkpoint_400000.pt"
+
+# Only Enc (0.1 weightage) Loss in Modifications
+train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766790476/checkpoint_400000.pt"

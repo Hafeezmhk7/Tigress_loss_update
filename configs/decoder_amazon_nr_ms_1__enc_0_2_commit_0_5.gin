@@ -161,4 +161,11 @@ test.prefix_matching=False # todo: fix
 #train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766750552/checkpoint_400000.pt"
 
 # No Modifications in the Tiger Loss
-train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766749068/checkpoint_400000.pt"
+#train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766749068/checkpoint_400000.pt"
+
+# Removed Reconstruction loss only rqvae and Multi Scale loss
+#train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766847056/checkpoint_400000.pt"
+
+# Removed Reconstruction loss only rqvae and Multi Scale loss (1) and commit(0.5) and enc(0.2)
+train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766914609/checkpoint_400000.pt"
+

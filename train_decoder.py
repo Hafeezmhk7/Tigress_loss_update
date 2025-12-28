@@ -266,7 +266,7 @@ def train(
             run_name = f"{run_prefix}-{run_name}"
         run = wandb.init(entity="RecSys-UvA",
                          name=run_name,
-                         project="gen-ir-decoder-training",
+                         project="Loss-Decoder",
                          config=params)
 
     # load items dataset

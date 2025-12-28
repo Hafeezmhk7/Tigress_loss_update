@@ -397,8 +397,10 @@ class SeqData(Dataset):
                 image_features = self.image_features[item_ids[valid_item_mask]].to(x.device)
                 # convert image features to same dtype as x
                 image_features = image_features.to(x.dtype)
+                
                 if self.feature_combination_mode == "sum":
                     x[valid_item_mask] = x[valid_item_mask] + image_features
+                    
                 elif self.feature_combination_mode == "concat":
                     seq_len, x_dim = x.shape
                     img_dim = image_features.shape[1]
@@ -407,11 +409,16 @@ class SeqData(Dataset):
                     # copy valid x
                     x_valid = x[valid_item_mask]
                     x_new[valid_item_mask, :x_dim] = x_valid
-                    # copy original x
-                    # x_new[:, :x_dim] = x
                     # append image features only to valid rows
                     x_new[valid_item_mask, x_dim:] = image_features
                     x = x_new
+                    
+                    # ⭐ FIX: Also populate x_image for the tokenizer/model
+                    x_image = torch.zeros(self.max_seq_len, img_dim, device=x.device, dtype=x.dtype)
+                    valid_idx = valid_item_mask.nonzero(as_tuple=True)[0]
+                    if len(valid_idx) > 0:
+                        x_image[valid_idx] = image_features
+                    
                 elif self.feature_combination_mode == "cross-attn":
                     x_image = torch.zeros(self.max_seq_len, image_features.shape[1], device=x.device, dtype=x.dtype)
                     # positions of valid items
