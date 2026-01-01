@@ -31,37 +31,6 @@ if not logger.hasHandlers():
     logger.propagate = False
 
 
-def load_patch_embeddings(data_dir: str, dataset_split: str, device: str):
-    """
-    Load precomputed patch embeddings and masks.
-    
-    Returns:
-        text_patches: torch.Tensor [N, max_seq_len, hidden_dim]
-        text_masks: torch.Tensor [N, max_seq_len]
-    """
-    embeddings_path = os.path.join(data_dir, f"{dataset_split}_text_patches.npy")
-    masks_path = os.path.join(data_dir, f"{dataset_split}_text_masks.npy")
-    
-    if not os.path.exists(embeddings_path):
-        raise FileNotFoundError(
-            f"Patch embeddings not found at {embeddings_path}. "
-            f"Please run scripts/precompute_patch_embeddings.py first."
-        )
-    
-    logger.info(f"Loading patch embeddings from {embeddings_path}")
-    text_patches = np.load(embeddings_path)
-    text_patches = torch.from_numpy(text_patches).float().to(device)
-    
-    logger.info(f"Loading attention masks from {masks_path}")
-    text_masks = np.load(masks_path)
-    text_masks = torch.from_numpy(text_masks).bool().to(device)
-    
-    logger.info(f"Loaded patch embeddings: {text_patches.shape}")
-    logger.info(f"Loaded attention masks: {text_masks.shape}")
-    
-    return text_patches, text_masks
-
-
 def train_iteration(
         model,
         optimizer,
@@ -85,10 +54,7 @@ def train_iteration(
         save_model_every,
         log_dir,
         pbar,
-        # Patch-related arguments
         use_patch_encoder,
-        text_patches_all,
-        text_masks_all,
         t=0.2,
     ): 
     # set model to training mode
@@ -103,11 +69,8 @@ def train_iteration(
             train_dataset[torch.arange(min(20000, len(train_dataset)))], device
         )
         if use_patch_encoder:
-            # Get indices for this batch
-            indices = kmeans_init_data.ids if hasattr(kmeans_init_data, 'ids') else torch.arange(len(kmeans_init_data.x))
-            batch_text_patches = text_patches_all[indices] if text_patches_all is not None else None
-            batch_text_masks = text_masks_all[indices] if text_masks_all is not None else None
-            model(kmeans_init_data, t, batch_text_patches, batch_text_masks)
+            # Pass patches from the batch
+            model(kmeans_init_data, t, kmeans_init_data.text_patches, kmeans_init_data.text_masks)
         else:
             model(kmeans_init_data, t)
 
@@ -115,22 +78,13 @@ def train_iteration(
     for _ in range(gradient_accumulate_every):
         data = next_batch(train_dataloader, device)
         
-        # Get patch embeddings for this batch if using patch encoder
-        if use_patch_encoder:
-            if hasattr(data, 'ids'):
-                batch_indices = data.ids.flatten()
-            else:
-                batch_size = data.x.shape[0]
-                batch_indices = torch.arange(batch_size, device=device)
-            
-            batch_text_patches = text_patches_all[batch_indices] if text_patches_all is not None else None
-            batch_text_masks = text_masks_all[batch_indices] if text_masks_all is not None else None
-        else:
-            batch_text_patches = None
-            batch_text_masks = None
-        
         with accelerator.autocast():
-            model_output = model(data, gumbel_t=t, text_patches=batch_text_patches, text_mask=batch_text_masks)
+            if use_patch_encoder:
+                # Use patches from the batch (already loaded by ItemData)
+                model_output = model(data, gumbel_t=t, text_patches=data.text_patches, text_mask=data.text_masks)
+            else:
+                model_output = model(data, gumbel_t=t)
+            
             loss = model_output.loss / gradient_accumulate_every
             total_loss += loss
 
@@ -218,8 +172,6 @@ def train_iteration(
             eval_log = evaluate(
                 model, eval_dataloader, device,
                 use_patch_encoder=use_patch_encoder,
-                text_patches_all=text_patches_all,
-                text_masks_all=text_masks_all,
                 t=t
             )
 
@@ -253,8 +205,7 @@ def train_iteration(
     return
 
 
-def evaluate(model, eval_dataloader, device, use_patch_encoder=False, 
-             text_patches_all=None, text_masks_all=None, t=0.2):
+def evaluate(model, eval_dataloader, device, use_patch_encoder=False, t=0.2):
     model.eval()
     eval_losses = [[], [], [], []] if use_patch_encoder else [[], [], []]
     pbar = tqdm(eval_dataloader, desc=f"Eval")
@@ -262,21 +213,12 @@ def evaluate(model, eval_dataloader, device, use_patch_encoder=False,
         for batch in pbar:
             data = batch_to(batch, device)
             
-            # Get patch embeddings for this batch if using patch encoder
             if use_patch_encoder:
-                if hasattr(data, 'ids'):
-                    batch_indices = data.ids.flatten()
-                else:
-                    batch_size = data.x.shape[0]
-                    batch_indices = torch.arange(batch_size, device=device)
-                
-                batch_text_patches = text_patches_all[batch_indices] if text_patches_all is not None else None
-                batch_text_masks = text_masks_all[batch_indices] if text_masks_all is not None else None
+                # Use patches from the batch (already loaded by ItemData)
+                model_output = model(data, gumbel_t=t, text_patches=data.text_patches, text_mask=data.text_masks)
             else:
-                batch_text_patches = None
-                batch_text_masks = None
+                model_output = model(data, gumbel_t=t)
             
-            model_output = model(data, gumbel_t=t, text_patches=batch_text_patches, text_mask=batch_text_masks)
             eval_losses[0].append(model_output.loss.cpu().item())
             eval_losses[1].append(model_output.reconstruction_loss.cpu().item())
             eval_losses[2].append(model_output.pqvae_loss.cpu().item())
@@ -303,8 +245,8 @@ def train(
     batch_size=64,
     learning_rate=0.0001,
     weight_decay=0.01,
-    dataset_folder="dataset/ml-1m",
-    dataset=RecDataset.ML_1M,
+    dataset_folder="dataset/amazon/2014",
+    dataset=RecDataset.AMAZON,
     pretrained_pqvae_path=None,
     log_dir="logdir/",
     use_kmeans_init=True,
@@ -315,7 +257,7 @@ def train(
     mixed_precision_type="fp16",
     gradient_accumulate_every=1,
     save_model_every=1000000,
-    eval_every=50000,
+    eval_every=5000,
     log_every=1000,
     commitment_weight=0.25,
     vae_n_cat_feats=0,
@@ -340,7 +282,10 @@ def train(
     patch_dropout=0.1,
     patch_diversity_weight=0.1,
     patch_hybrid_mode=False,
-    patch_embeddings_dir="data/processed",
+    # Patch embeddings parameters (for ItemData)
+    use_patch_embeddings=False,  # Enable automatic patch processing in ItemData
+    patch_model_name="sentence-transformers/sentence-t5-xl",
+    patch_max_seq_length=77,
 ):
 
     # create logdir if not exists
@@ -348,6 +293,7 @@ def train(
     logger.info(f"Session Started with UID '{uid}' | Dataset '{dataset_folder}' | Split '{dataset_split}'")
     if use_patch_encoder:
         logger.info(f"[PATCH MODE] Using Product Quantization with {num_codebooks} independent codebooks")
+        logger.info(f"[PATCH MODE] Automatic patch processing: {use_patch_embeddings}")
     log_dir = os.path.join(os.path.expanduser("~"), log_dir, dataset_split, uid)
     os.makedirs(log_dir, exist_ok=True)
     
@@ -359,20 +305,10 @@ def train(
     device = accelerator.device
     display_args(locals())
 
-    # Load patch embeddings if using patch encoder
-    text_patches_all = None
-    text_masks_all = None
-    if use_patch_encoder:
-        text_patches_all, text_masks_all = load_patch_embeddings(
-            data_dir=patch_embeddings_dir,
-            dataset_split=dataset_split,
-            device=device
-        )
-
     # logging
     if wandb_logging and accelerator.is_main_process:
         params = locals()
-        mode_suffix = "-pq" if use_patch_encoder else ""
+        mode_suffix = "-pq-patch" if use_patch_encoder else "-pq"
         run_name = f"pq-vae{mode_suffix}-{dataset.name.lower()}-{dataset_split}" + "/" + uid
         if run_prefix:
             run_name = f"{run_prefix}-{run_name}"
@@ -391,6 +327,10 @@ def train(
         use_image_features=use_image_features,
         feature_combination_mode=feature_combination_mode,
         device=device,
+        # NEW: Enable automatic patch processing
+        use_patch_embeddings=use_patch_embeddings,
+        patch_model_name=patch_model_name,
+        patch_max_seq_length=patch_max_seq_length,
     )
     train_sampler = BatchSampler(RandomSampler(train_dataset), batch_size, False)
     train_dataloader = DataLoader(
@@ -413,6 +353,10 @@ def train(
         use_image_features=use_image_features,
         feature_combination_mode=feature_combination_mode,
         device=device,
+        # NEW: Enable automatic patch processing
+        use_patch_embeddings=use_patch_embeddings,
+        patch_model_name=patch_model_name,
+        patch_max_seq_length=patch_max_seq_length,
     )
     eval_sampler = BatchSampler(RandomSampler(eval_dataset), batch_size, False)
     eval_dataloader = DataLoader(
@@ -434,6 +378,10 @@ def train(
             use_image_features=use_image_features,
             feature_combination_mode=feature_combination_mode,
             device=device,
+            # NEW: Enable automatic patch processing
+            use_patch_embeddings=use_patch_embeddings,
+            patch_model_name=patch_model_name,
+            patch_max_seq_length=patch_max_seq_length,
         )
     )
 
@@ -528,10 +476,7 @@ def train(
                 save_model_every=save_model_every,
                 pbar=pbar,
                 log_dir=log_dir,
-                # Patch parameters
                 use_patch_encoder=use_patch_encoder,
-                text_patches_all=text_patches_all,
-                text_masks_all=text_masks_all,
                 t=t,
             )
             pbar.update(1)

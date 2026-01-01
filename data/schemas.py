@@ -14,6 +14,9 @@ class SeqBatch(NamedTuple):
     x_brand_id: Tensor
     seq_mask: Tensor
     x_image: Optional[Tensor] = None
+    # NEW: Patch embeddings for PQ-VAE
+    text_patches: Optional[Tensor] = None  # [B, N_tokens, hidden_dim]
+    text_masks: Optional[Tensor] = None     # [B, N_tokens]
 
 
 class TokenizedSeqBatch(NamedTuple):

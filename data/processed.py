@@ -139,8 +139,17 @@ class ItemData(Dataset):
                 os.makedirs(os.path.dirname(features_path), exist_ok=True)
                 torch.save(self.image_features, features_path)
 
+# =============================================================================
+# COMPLETE REPLACEMENT for data/processed.py patch processing section
+# Lines ~145-185 in your data/processed.py
+# =============================================================================
+# This fixes: ValueError: Expected object or value
+# Cause: pd.read_json() can't read .gz files directly
+# Solution: Use gzip.open() + json.loads() like rest of codebase
+# =============================================================================
+
         # ========================================
-        # NEW: PATCH EMBEDDINGS (following image features pattern)
+        # PATCH EMBEDDINGS (following image features pattern)
         # ========================================
         if self.use_patch_embeddings:
             # Initialize patch processor
@@ -151,20 +160,37 @@ class ItemData(Dataset):
                 max_seq_length=patch_max_seq_length,
             )
             
-            # Check if already cached (same pattern as image features)
+            # Check if already cached
             if self.patch_processor.is_processed and not force_process:
                 logger.info(f"Patch embeddings already cached for {self.dataset_split}")
             else:
                 logger.info(f"Processing patch embeddings for {self.dataset_split}...")
                 
-                # Get item titles from metadata
+                # ===== FIX STARTS HERE =====
                 import pandas as pd
-                metadata_path = os.path.join(self.root, f"meta_{self.dataset_split}.json.gz")
+                import gzip
+                import json
+                
+                # Correct path: raw/beauty/meta.json.gz
+                metadata_path = os.path.join(self.root, "raw", self.dataset_split, "meta.json.gz")
                 
                 if not os.path.exists(metadata_path):
-                    raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
+                    raise FileNotFoundError(
+                        f"Metadata file not found: {metadata_path}\n"
+                        f"Expected: {self.root}/raw/{self.dataset_split}/meta.json.gz"
+                    )
                 
-                meta_df = pd.read_json(metadata_path, lines=True)
+                # ✅ CORRECT: Read gzipped JSON line by line
+                logger.info(f"Loading metadata from {metadata_path}...")
+                meta_data = []
+                with gzip.open(metadata_path, 'rt', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():  # Skip empty lines
+                            meta_data.append(json.loads(line))
+                
+                meta_df = pd.DataFrame(meta_data)
+                logger.info(f"✓ Loaded {len(meta_df)} items from metadata")
+                # ===== FIX ENDS HERE =====
                 
                 # Combine title and description
                 if 'title' in meta_df.columns and 'description' in meta_df.columns:
@@ -177,11 +203,21 @@ class ItemData(Dataset):
                 else:
                     raise ValueError("Metadata must contain 'title' column")
                 
+                logger.info(f"✓ Extracted {len(item_titles)} item titles")
+                
                 # Process and cache embeddings
                 self.patch_processor.process(item_titles, force_reprocess=force_process)
                 logger.info(f"✅ Patch embeddings cached to {self.patch_processor.embeddings_path}")
         else:
             self.patch_processor = None
+
+# =============================================================================
+# HOW TO APPLY THIS FIX:
+# =============================================================================
+# 1. Open data/processed.py
+# 2. Find line ~168: meta_df = pd.read_json(metadata_path, lines=True)
+# 3. Replace that SINGLE line with the 7 lines in "FIX STARTS/ENDS HERE"
+# =============================================================================
 
     def __len__(self):
         return self.item_data.shape[0]
