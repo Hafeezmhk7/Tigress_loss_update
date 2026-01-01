@@ -154,3 +154,107 @@ class Quantize(nn.Module):
             loss = self.quantize_loss(query=x, value=emb_out)
 
         return QuantizeOutput(embeddings=emb_out, ids=ids, loss=loss)
+
+
+class ProductQuantize(nn.Module):
+    """
+    Product Quantization: Independent codebooks for each subspace.
+    
+    Instead of residual quantization (sequential):
+        z₀ = VQ(x)
+        z₁ = VQ(x - z₀)
+        z₂ = VQ(x - z₀ - z₁)
+    
+    We use product quantization (parallel):
+        z₀ = VQ₀(x₀)  # Brand codebook
+        z₁ = VQ₁(x₁)  # Category codebook
+        z₂ = VQ₂(x₂)  # Attribute codebook
+        z₃ = VQ₃(x₃)  # Detail codebook
+    
+    This is more natural for patch-based semantic encoding where each
+    patch represents a distinct semantic aspect.
+    """
+    
+    def __init__(
+        self,
+        num_codebooks: int,
+        embed_dim: int,
+        codebook_size: int,
+        do_kmeans_init: bool = True,
+        codebook_normalize: bool = False,
+        sim_vq: bool = False,
+        commitment_weight: float = 0.25,
+        forward_mode: QuantizeForwardMode = QuantizeForwardMode.ROTATION_TRICK,
+        distance_mode: QuantizeDistance = QuantizeDistance.L2,
+    ) -> None:
+        super().__init__()
+        
+        self.num_codebooks = num_codebooks
+        self.embed_dim = embed_dim
+        self.codebook_size = codebook_size
+        
+        # Create independent codebooks
+        self.codebooks = nn.ModuleList([
+            Quantize(
+                embed_dim=embed_dim,
+                n_embed=codebook_size,
+                do_kmeans_init=do_kmeans_init,
+                codebook_normalize=i == 0 and codebook_normalize,  # Only first
+                sim_vq=sim_vq,
+                commitment_weight=commitment_weight,
+                forward_mode=forward_mode,
+                distance_mode=distance_mode,
+            )
+            for i in range(num_codebooks)
+        ])
+    
+    def forward(self, patches: Tensor, temperature: float = 0.001) -> QuantizeOutput:
+        """
+        Args:
+            patches: [B, num_codebooks, embed_dim] - Independent patches
+            temperature: Temperature for Gumbel-Softmax
+        
+        Returns:
+            QuantizeOutput with:
+                embeddings: [B, num_codebooks, embed_dim] - Quantized patches
+                ids: [B, num_codebooks] - Code indices
+                loss: scalar - Combined quantization loss
+        """
+        B, M, D = patches.shape
+        assert M == self.num_codebooks, f"Expected {self.num_codebooks} patches, got {M}"
+        assert D == self.embed_dim, f"Expected embed_dim {self.embed_dim}, got {D}"
+        
+        # Quantize each patch independently
+        quantized_patches = []
+        ids_list = []
+        total_loss = 0.0
+        
+        for i in range(self.num_codebooks):
+            patch = patches[:, i, :]  # [B, embed_dim]
+            result = self.codebooks[i](patch, temperature)
+            
+            quantized_patches.append(result.embeddings)  # [B, embed_dim]
+            ids_list.append(result.ids)  # [B]
+            total_loss += result.loss
+        
+        # Stack results
+        embeddings = torch.stack(quantized_patches, dim=1)  # [B, M, D]
+        ids = torch.stack(ids_list, dim=1)  # [B, M]
+        
+        # Average loss across codebooks
+        loss = total_loss / self.num_codebooks
+        
+        return QuantizeOutput(embeddings=embeddings, ids=ids, loss=loss)
+    
+    def get_codebook_embeddings(self, patch_idx: int, code_ids: Tensor) -> Tensor:
+        """
+        Get embeddings for specific codes from a specific codebook.
+        
+        Args:
+            patch_idx: Which codebook (0 to num_codebooks-1)
+            code_ids: [B] - Code indices
+        
+        Returns:
+            embeddings: [B, embed_dim]
+        """
+        return self.codebooks[patch_idx].get_item_embeddings(code_ids)

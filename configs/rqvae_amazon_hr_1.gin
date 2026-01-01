@@ -1,0 +1,156 @@
+import data.processed
+import modules.quantize
+
+# ===== BASE CONFIGURATION =====
+train.iterations=400000
+train.learning_rate=0.0005
+train.weight_decay=0.01
+train.batch_size=128  # Good for InfoNCE
+train.vae_input_dim=768
+train.vae_n_layers=3
+train.vae_n_cat_feats=0
+train.vae_hidden_dims=[512, 256, 128]
+train.vae_embed_dim=32
+train.vae_codebook_size=256
+train.pretrained_rqvae_path=None
+train.vae_codebook_normalize=False
+train.vae_sim_vq=False
+train.save_model_every=80000
+train.eval_every=10000
+train.log_every=10000
+train.dataset=%data.processed.RecDataset.AMAZON
+train.commitment_weight=0.3  # Slightly increased for stability
+train.vae_codebook_mode=%modules.quantize.QuantizeForwardMode.ROTATION_TRICK
+train.force_dataset_process=False
+train.debug=False
+train.dataset_folder="dataset/amazon/2014"
+train.dataset_split="beauty"
+train.log_dir="logdir/rqvae/amazon/2014"
+train.wandb_logging=True
+train.use_image_features=True
+train.feature_combination_mode="concat"
+train.run_prefix=""
+train.use_cross_attn=False
+train.attn_heads=8
+
+# ===== HIERARCHICAL MULTI-SCALE CONTRASTIVE LEARNING =====
+
+# ===== EXPERIMENT 1: Baseline (No InfoNCE) =====
+#train.use_encoder_infonce=False
+#train.use_multiscale_infonce=False
+#train.use_cost_infonce=False
+
+# ===== EXPERIMENT 2: Multi-Scale with EQUAL weights (Your current MS 1.0) =====
+# This should match your current MS(1.0) results: NDCG ≈ 0.0217
+#train.use_encoder_infonce=False
+#train.use_multiscale_infonce=True
+#train.use_cost_infonce=False
+#train.infonce_temperature=0.07
+#train.multiscale_infonce_weight=1.0
+#train.multiscale_level_weights=[1.0, 1.0, 1.0]  # Equal weights = no hierarchy
+
+# ===== EXPERIMENT 3: HIERARCHICAL Multi-Scale (PRIMARY - NEW!) =====
+# Hierarchical weights solve the "random hash trap" problem
+
+train.use_encoder_infonce=False
+train.use_multiscale_infonce=True
+train.use_cost_infonce=False
+train.infonce_temperature=0.07
+train.multiscale_infonce_weight=0.5
+train.multiscale_level_weights=[0.0, 0.4, 1.0]  # HIERARCHICAL: Low→High
+train.run_prefix="Hier-MS(0.5)_RS(0.4)-0-0.4-1.0"
+train.encoder_infonce_weight=0.2
+train.cost_infonce_weight=0.2
+train.encoder_dropout_rate=0.1
+#train.run_prefix= "Hierarchical-MS-Reconst"
+
+# ===== RECONSTRUCTION LOSS (NEW!) =====
+train.use_reconstruction_loss=True
+train.reconstruction_weight=0.4  # Semantic anchor (complementary with MS InfoNCE)
+
+# ===== EXPERIMENT 4: Hierarchical MS + CoST InfoNCE =====
+# Best expected performance: +15-25% NDCG improvement
+#train.use_encoder_infonce=False
+#train.use_multiscale_infonce=True
+#train.use_cost_infonce=True
+#train.infonce_temperature=0.07
+#train.multiscale_infonce_weight=0.7  # Reduced to balance with CoST
+#train.multiscale_level_weights=[0.1, 0.4, 1.0]  # Hierarchical
+#train.cost_infonce_weight=0.3
+#train.run_prefix="Hierarchical-MS-CoST"
+
+# ===== EXPERIMENT 5: Hierarchical MS + Encoder InfoNCE =====
+#train.use_encoder_infonce=True
+#train.use_multiscale_infonce=True
+#train.use_cost_infonce=False
+#train.infonce_temperature=0.07
+#train.encoder_infonce_weight=0.2
+#train.multiscale_infonce_weight=1.0
+#train.multiscale_level_weights=[0.1, 0.4, 1.0]  # Hierarchical
+#train.encoder_dropout_rate=0.1
+#train.run_prefix="Hierarchical-MS-Enc"
+
+# ===== EXPERIMENT 6: Full Triple-Stage with Hierarchy =====
+#train.use_encoder_infonce=True
+#train.use_multiscale_infonce=True
+#train.use_cost_infonce=True
+#train.infonce_temperature=0.07
+#train.encoder_infonce_weight=0.2
+#train.multiscale_infonce_weight=0.7
+#train.multiscale_level_weights=[0.1, 0.4, 1.0]  # Hierarchical
+#train.cost_infonce_weight=0.3
+#train.encoder_dropout_rate=0.1
+#train.run_prefix="Full-Triple-Stage-Hierarchical"
+
+# ===== ABLATION: Reversed Hierarchy (Should FAIL!) =====
+# This validates that hierarchy direction matters
+# Expected: NDCG@5 < 0.0217 (worse than baseline!)
+#train.use_encoder_infonce=False
+#train.use_multiscale_infonce=True
+#train.use_cost_infonce=False
+#train.infonce_temperature=0.07
+#train.multiscale_infonce_weight=1.0
+#train.multiscale_level_weights=[1.0, 0.4, 0.1]  # REVERSED: High→Low (WRONG!)
+#train.run_prefix="Reversed-Hierarchy-FAIL"
+
+# ===== ABLATION: Gentle Hierarchy =====
+#train.use_encoder_infonce=False
+#train.use_multiscale_infonce=True
+#train.use_cost_infonce=False
+#train.infonce_temperature=0.07
+#train.multiscale_infonce_weight=1.0
+#train.multiscale_level_weights=[0.05, 0.3, 1.0]  # More gentle
+#train.run_prefix="Gentle-Hierarchy-0.05-0.3-1.0"
+
+# ===== ABLATION: Aggressive Hierarchy =====
+#train.use_encoder_infonce=False
+#train.use_multiscale_infonce=True
+#train.use_cost_infonce=False
+#train.infonce_temperature=0.07
+#train.multiscale_infonce_weight=1.0
+#train.multiscale_level_weights=[0.2, 0.5, 1.0]  # More aggressive
+#train.run_prefix="Aggressive-Hierarchy-0.2-0.5-1.0"
+
+# ===== KEY INSIGHT =====
+#
+# Hierarchical weights [0.1, 0.4, 1.0] create "funnel effect":
+#
+# Level 0 (Weight 0.1 - LOW):
+#   → Low InfoNCE repulsion
+#   → Similar items CLUSTER into families
+#   → "All red lipsticks" → L0 = 42 (lipstick family)
+#   → Decoder learns: "lipstick family → foundation family"
+#   → This is COLLABORATIVE FILTERING embedded in IDs!
+#
+# Level 2 (Weight 1.0 - HIGH):
+#   → High InfoNCE repulsion
+#   → Items are UNIQUE and discriminative
+#   → "Maybelline Red" vs "MAC Red" have different L2
+#   → Provides high information for beam search
+#   → Enables PERSONALIZED recommendations
+#
+# Combined Effect:
+#   ✓ Family relationships at L0 (popular patterns)
+#   ✓ Unique identifiers at L2 (personalization)
+#   ✓ Hierarchical structure for seq2seq decoder
+#   ✓ Solves the "random hash trap" problem!

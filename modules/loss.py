@@ -49,25 +49,15 @@ class QuantizeLoss(nn.Module):
 class InfoNCELoss(nn.Module):
     """
     Standard InfoNCE contrastive loss using cross-entropy formulation.
-    
-    Reference: van den Oord et al. (2018). Representation Learning with 
-               Contrastive Predictive Coding.
     """
     def __init__(self, temperature: float = 0.07) -> None:
         super().__init__()
         self.temperature = temperature
     
     def forward(self, q: Tensor, k: Tensor) -> Tensor:
-        """
-        Args:
-            q: [N, d] query embeddings
-            k: [N, d] key embeddings
-        Returns:
-            InfoNCE loss scalar
-        """
         batch_size = q.shape[0]
         
-        # Normalize embeddings to unit sphere
+        # Normalize inputs
         q = F.normalize(q, dim=1, eps=1e-8)
         k = F.normalize(k, dim=1, eps=1e-8)
         
@@ -87,12 +77,6 @@ class InfoNCELoss(nn.Module):
 class EncoderInfoNCELoss(nn.Module):
     """
     Encoder-level InfoNCE to prevent latent collapse at Level 0.
-    
-    Uses dropout augmentation to create two views of the same item.
-    Ensures encoder outputs are well-distributed before quantization.
-    
-    Novel Contribution: First explicit treatment of Level-0 collapse
-    in semantic ID generation for recommender systems.
     """
     def __init__(
         self, 
@@ -105,67 +89,86 @@ class EncoderInfoNCELoss(nn.Module):
         self.infonce = InfoNCELoss(temperature=temperature)
     
     def forward(self, encoder_output: Tensor) -> Tensor:
-        """
-        Args:
-            encoder_output: [N, d] encoder embeddings BEFORE quantization
-        Returns:
-            Encoder InfoNCE loss scalar
-        """
         # Create two augmented views via dropout
-        # View 1: Apply dropout
         view1 = self.dropout(encoder_output)
-        
-        # View 2: Apply dropout again (different mask)
         view2 = self.dropout(encoder_output)
         
-        # Contrastive loss between two views
-        # Enforces: same item should have similar encoding despite dropout
         loss = self.infonce(view1, view2)
-        
         return loss
 
 
 class MultiScaleInfoNCELoss(nn.Module):
     """
-    Multi-scale residual InfoNCE for per-level distinctiveness.
+    Hierarchical Multi-scale InfoNCE Loss.
     
-    Applies InfoNCE loss at each residual quantization level independently.
-    
-    Novel Contribution: First per-level InfoNCE supervision in 
-    hierarchical RQ-VAE for semantic IDs.
+    Normalizes codebook vectors and residuals before computing contrastive loss.
     """
     def __init__(
         self, 
         n_levels: int, 
         temperature: float = 0.07, 
-        level_weights: List[float] = None
+        level_weights: List[float] = None,
     ) -> None:
         super().__init__()
         self.n_levels = n_levels
+        
+        # Create InfoNCE loss for each level
         self.infonce_losses = nn.ModuleList([
             InfoNCELoss(temperature) for _ in range(n_levels)
         ])
-        # Allow different weights per level (e.g., emphasize higher levels)
-        self.level_weights = level_weights if level_weights else [1.0] * n_levels
+        
+        # Use raw weights (NO NORMALIZATION)
+        if level_weights is None:
+            self.level_weights = [1.0] * n_levels
+        else:
+            assert len(level_weights) == n_levels, \
+                f"level_weights must have length {n_levels}, got {len(level_weights)}"
+            self.level_weights = level_weights
+        
+        # Store for logging
+        self.per_level_losses = {}
+        
+        # Log configuration
+        import logging
+        logger = logging.getLogger("recsys_logger")
+        logger.info(f"")
+        logger.info(f"{'='*70}")
+        logger.info(f"Hierarchical Multi-Scale InfoNCE Configuration:")
+        logger.info(f"{'='*70}")
+        logger.info(f"  Levels: {n_levels}")
+        logger.info(f"  Temperature: {temperature}")
+        logger.info(f"  Level Weights (RAW): {self.level_weights}")
+        logger.info(f"{'='*70}")
+        logger.info(f"")
     
     def forward(
         self, 
         quantized_list: List[Tensor], 
         residual_list: List[Tensor]
     ) -> Tensor:
-        """
-        Args:
-            quantized_list: List of [N, d] quantized embeddings per level
-            residual_list: List of [N, d] residuals BEFORE quantization per level
-        Returns:
-            Weighted sum of InfoNCE losses across all levels
-        """
+        assert len(quantized_list) == self.n_levels
+        assert len(residual_list) == self.n_levels
+        
         total_loss = 0
+        self.per_level_losses = {}
+        
         for level, (q, k, weight) in enumerate(
             zip(quantized_list, residual_list, self.level_weights)
         ):
+            # Compute InfoNCE at this level (normalization happens inside InfoNCELoss)
             level_loss = self.infonce_losses[level](q, k)
-            total_loss += weight * level_loss
+            
+            # Apply hierarchical weight (RAW, not normalized)
+            weighted_loss = weight * level_loss
+            total_loss += weighted_loss
+            
+            # Store for logging
+            self.per_level_losses[f'ms_loss_L{level}'] = level_loss.item()
+            self.per_level_losses[f'ms_weight_L{level}'] = weight
+            self.per_level_losses[f'ms_weighted_L{level}'] = weighted_loss.item()
+        
+        # Return total (NOT averaged by n_levels)
+        self.per_level_losses['ms_total'] = total_loss.item()
         
         return total_loss
 
@@ -173,14 +176,6 @@ class MultiScaleInfoNCELoss(nn.Module):
 class CoSTInfoNCELoss(nn.Module):
     """
     CoST (Contrastive Semantic Tokenization) reconstruction-level InfoNCE.
-    
-    Ensures reconstructed embeddings preserve semantic relationships
-    from original embeddings. Critical for downstream LLM performance.
-    
-    Reference: Zhu et al. (2024). CoST: Contrastive Quantization based 
-               Semantic Tokenization for Generative Recommendation.
-    
-    Improvement over baseline: 43% on MIND dataset (RecSys 2024).
     """
     def __init__(self, temperature: float = 0.07) -> None:
         super().__init__()
@@ -191,15 +186,5 @@ class CoSTInfoNCELoss(nn.Module):
         reconstructed: Tensor, 
         original: Tensor
     ) -> Tensor:
-        """
-        Args:
-            reconstructed: [N, d] decoder output (sum of quantized embeddings)
-            original: [N, d] original encoder output BEFORE quantization
-        Returns:
-            CoST InfoNCE loss scalar
-        """
-        # Contrastive loss between reconstructed and original
-        # Enforces: reconstructed should match original semantics
         loss = self.infonce(reconstructed, original)
-        
         return loss

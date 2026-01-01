@@ -57,6 +57,7 @@ class SemanticIdTokenizer(nn.Module):
             commitment_weight=commitment_weight,
             use_cross_attn=use_cross_attn,
             attn_heads=attn_heads,
+            # use_projection_head=use_projection_head,  # ← ADD THIS
             mixed_precision_type=mixed_precision_type,
         )
 

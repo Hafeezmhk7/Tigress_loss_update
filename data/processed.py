@@ -14,7 +14,7 @@ from data.schemas import SeqBatch
 from enum import Enum
 from torch import Tensor
 from torch.utils.data import Dataset
-from typing import Optional
+from typing import Optional, Tuple
 import logging
 from PIL import Image
 from torch import nn
@@ -22,6 +22,9 @@ import json
 import clip
 from tqdm import tqdm
 import numpy as np
+
+# NEW: Import PatchEmbeddingProcessor
+from data.patch_processor import PatchEmbeddingProcessor
 
 # fetch logger
 logger = logging.getLogger("recsys_logger")
@@ -78,17 +81,24 @@ class ItemData(Dataset):
         use_image_features: bool = False,
         feature_combination_mode: str = "sum",
         device: str = "cpu",
+        # NEW: Patch embedding parameters
+        use_patch_embeddings: bool = False,
+        patch_model_name: str = "sentence-transformers/sentence-t5-xl",
+        patch_max_seq_length: int = 77,
         **kwargs
     ) -> None:
 
         self.use_image_features = use_image_features
+        self.use_patch_embeddings = use_patch_embeddings  # NEW
         self.root = root
         self.device = device
         self.feature_combination_mode = feature_combination_mode
+        
         raw_dataset_class = DATASET_NAME_TO_RAW_DATASET[dataset]
         max_seq_len = DATASET_NAME_TO_MAX_SEQ_LEN[dataset]
         raw_data = raw_dataset_class(root=self.root, *args, **kwargs)
         processed_data_path = raw_data.processed_paths[0]
+        
         if not os.path.exists(processed_data_path) or force_process:
             raw_data.process(max_seq_len=max_seq_len)
 
@@ -107,6 +117,9 @@ class ItemData(Dataset):
         self.dataset_split = kwargs.get("split")
         logger.info(f"For `{self.dataset_split}` using the datapath: {processed_data_path}")
 
+        # ========================================
+        # IMAGE FEATURES (existing code)
+        # ========================================
         if self.use_image_features:
             with open(os.path.join(self.root, "raw", self.dataset_split, "datamaps.json"), "r") as f:
                 self.data_maps = json.load(f)
@@ -125,7 +138,50 @@ class ItemData(Dataset):
                 self.image_features = self._precompute_image_features()
                 os.makedirs(os.path.dirname(features_path), exist_ok=True)
                 torch.save(self.image_features, features_path)
-        
+
+        # ========================================
+        # NEW: PATCH EMBEDDINGS (following image features pattern)
+        # ========================================
+        if self.use_patch_embeddings:
+            # Initialize patch processor
+            self.patch_processor = PatchEmbeddingProcessor(
+                processed_dir=os.path.join(self.root, "processed"),
+                dataset_split=self.dataset_split,
+                model_name=patch_model_name,
+                max_seq_length=patch_max_seq_length,
+            )
+            
+            # Check if already cached (same pattern as image features)
+            if self.patch_processor.is_processed and not force_process:
+                logger.info(f"Patch embeddings already cached for {self.dataset_split}")
+            else:
+                logger.info(f"Processing patch embeddings for {self.dataset_split}...")
+                
+                # Get item titles from metadata
+                import pandas as pd
+                metadata_path = os.path.join(self.root, f"meta_{self.dataset_split}.json.gz")
+                
+                if not os.path.exists(metadata_path):
+                    raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
+                
+                meta_df = pd.read_json(metadata_path, lines=True)
+                
+                # Combine title and description
+                if 'title' in meta_df.columns and 'description' in meta_df.columns:
+                    item_titles = (
+                        meta_df['title'].fillna('') + ' ' + 
+                        meta_df['description'].fillna('')
+                    ).str.strip().tolist()
+                elif 'title' in meta_df.columns:
+                    item_titles = meta_df['title'].fillna('').tolist()
+                else:
+                    raise ValueError("Metadata must contain 'title' column")
+                
+                # Process and cache embeddings
+                self.patch_processor.process(item_titles, force_reprocess=force_process)
+                logger.info(f"✅ Patch embeddings cached to {self.patch_processor.embeddings_path}")
+        else:
+            self.patch_processor = None
 
     def __len__(self):
         return self.item_data.shape[0]
@@ -172,6 +228,26 @@ class ItemData(Dataset):
         
         return all_features
 
+    # NEW: Helper method to get patch embeddings
+    def get_patch_embeddings(
+        self,
+        indices: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Get patch embeddings for given indices.
+        
+        Args:
+            indices: Item indices
+            
+        Returns:
+            text_patches: [batch_size, max_seq_len, hidden_dim] or None
+            text_masks: [batch_size, max_seq_len] or None
+        """
+        if not self.use_patch_embeddings or self.patch_processor is None:
+            return None, None
+        
+        return self.patch_processor.get_patch_embeddings(indices, device=self.device)
+
     def __getitem__(self, idx):
         item_ids = (
             torch.tensor(idx).unsqueeze(0) if not isinstance(idx, torch.Tensor) else idx
@@ -203,6 +279,12 @@ class ItemData(Dataset):
             else:
                 raise ValueError("Invalid feature combination mode!")
 
+        # NEW: Get patch embeddings if enabled
+        text_patches = None
+        text_masks = None
+        if self.use_patch_embeddings:
+            text_patches, text_masks = self.get_patch_embeddings(item_ids)
+
         return SeqBatch(
             user_ids=-1 * torch.ones_like(item_ids.squeeze(0)),
             ids=item_ids,
@@ -213,6 +295,8 @@ class ItemData(Dataset):
             x_fut=-1 * torch.ones_like(item_ids.squeeze(0)),
             x_fut_brand_id=-1 * torch.ones_like(item_ids.squeeze(0)),
             seq_mask=torch.ones_like(item_ids, dtype=bool),
+            text_patches=text_patches,  # NEW
+            text_masks=text_masks,       # NEW
         )
 
 

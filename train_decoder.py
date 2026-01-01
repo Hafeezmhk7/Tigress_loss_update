@@ -341,6 +341,7 @@ def train(
         rqvae_sim_vq=vae_sim_vq,
         use_cross_attn=use_rqvae_cross_attn,
         attn_heads=attn_heads,
+        # use_projection_head=False, 
         mixed_precision_type=mixed_precision_type,
     )
     tokenizer = accelerator.prepare(tokenizer)

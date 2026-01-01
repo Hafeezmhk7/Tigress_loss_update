@@ -36,7 +36,7 @@ train.pretrained_rqvae_path=None
 train.use_image_features=True # for multi-modal semantic ids
 train.feature_combination_mode="concat" # sum or concat if use_image_features
 train.enable_image_cross_attn=False
-train.run_prefix="debug" # for wandb
+train.run_prefix="Hier-MS(1)_RS(0)-1-0.5-0.5" # for wandb
 train.rope=False # todo: fix
 train.prefix_matching=False # todo: fix
 
@@ -167,4 +167,13 @@ test.prefix_matching=False # todo: fix
 #train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766847363/checkpoint_400000.pt"
 
 # No Reconstruction but 0.8 MS and 0.2 Enc
-train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766871422/checkpoint_400000.pt"
+#train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766871422/checkpoint_400000.pt"
+
+# NR HR
+#train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1766962335/checkpoint_400000.pt"
+
+# Hier-MS(0.5)_RS(0.2)-0-0.4-1.0
+#train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1767018284/checkpoint_400000.pt"
+
+# Hier-MS(1)_RS(0)-1-0.5-0.5
+train.pretrained_rqvae_path = "/home/scur0555/logdir/rqvae/amazon/2014/beauty/1767052363/checkpoint_400000.pt"

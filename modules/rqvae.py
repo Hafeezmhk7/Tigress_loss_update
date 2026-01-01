@@ -16,7 +16,6 @@ from typing import NamedTuple, Optional
 from torch import nn
 from torch import Tensor
 from modules.transformer.attention import MultiHeadAttention
-import torch.nn.functional as F
 
 # ===== TRIPLE-STAGE CONTRASTIVE LEARNING =====
 from modules.loss import EncoderInfoNCELoss, MultiScaleInfoNCELoss, CoSTInfoNCELoss
@@ -33,10 +32,10 @@ class RqVaeOutput(NamedTuple):
     sem_ids: Tensor
     quantize_loss: Tensor
     # ===== TRIPLE-STAGE CONTRASTIVE LEARNING =====
-    encoder_output: Optional[Tensor] = None  # For encoder InfoNCE
-    quantized_per_level: Optional[List[Tensor]] = None  # For multi-scale InfoNCE
-    residuals_per_level: Optional[List[Tensor]] = None  # For multi-scale InfoNCE
-    reconstructed: Optional[Tensor] = None  # For CoST InfoNCE
+    encoder_output: Optional[Tensor] = None
+    quantized_per_level: Optional[List[Tensor]] = None
+    residuals_per_level: Optional[List[Tensor]] = None
+    reconstructed: Optional[Tensor] = None
     # ===== END =====
 
 
@@ -74,8 +73,13 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         infonce_temperature: float = 0.07,
         encoder_infonce_weight: float = 0.1,
         multiscale_infonce_weight: float = 0.3,
+        multiscale_level_weights: List[float] = None,
         cost_infonce_weight: float = 0.2,
         encoder_dropout_rate: float = 0.1,
+        # ===== END =====
+        # ===== RECONSTRUCTION LOSS =====
+        use_reconstruction_loss: bool = True,
+        reconstruction_weight: float = 1.0,
         # ===== END =====
         # ===== CROSS-ATTENTION =====
         use_cross_attn: bool = False,
@@ -102,26 +106,11 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         self.encoder_infonce_weight = encoder_infonce_weight
         self.multiscale_infonce_weight = multiscale_infonce_weight
         self.cost_infonce_weight = cost_infonce_weight
+        # ===== END =====
         
-        logger.info(f"")
-        logger.info(f"{'='*70}")
-        logger.info(f"Triple-Stage Contrastive Learning Configuration:")
-        logger.info(f"{'='*70}")
-        logger.info(f"  Encoder InfoNCE (Level-0 Collapse):    {use_encoder_infonce}")
-        if use_encoder_infonce:
-            logger.info(f"    - Temperature: {infonce_temperature}")
-            logger.info(f"    - Weight: {encoder_infonce_weight}")
-            logger.info(f"    - Dropout Rate: {encoder_dropout_rate}")
-        logger.info(f"  Multi-Scale InfoNCE (Collisions):      {use_multiscale_infonce}")
-        if use_multiscale_infonce:
-            logger.info(f"    - Temperature: {infonce_temperature}")
-            logger.info(f"    - Weight: {multiscale_infonce_weight}")
-        logger.info(f"  CoST InfoNCE (Semantic Preservation):  {use_cost_infonce}")
-        if use_cost_infonce:
-            logger.info(f"    - Temperature: {infonce_temperature}")
-            logger.info(f"    - Weight: {cost_infonce_weight}")
-        logger.info(f"{'='*70}")
-        logger.info(f"")
+        # ===== RECONSTRUCTION LOSS =====
+        self.use_reconstruction_loss = use_reconstruction_loss
+        self.reconstruction_weight = reconstruction_weight
         # ===== END =====
 
         self.layers = nn.ModuleList(
@@ -183,7 +172,8 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         if self.use_multiscale_infonce:
             self.multiscale_infonce = MultiScaleInfoNCELoss(
                 n_levels=n_layers,
-                temperature=infonce_temperature
+                temperature=infonce_temperature,
+                level_weights=multiscale_level_weights,
             )
             logger.info(f"✓ Initialized Multi-Scale InfoNCE Loss")
         
@@ -264,7 +254,6 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         # ===== TRIPLE-STAGE CONTRASTIVE: Compute reconstruction for CoST =====
         reconstructed = None
         if self.use_cost_infonce:
-            # Sum of embeddings (before decoder)
             reconstructed = torch.stack(embs, dim=0).sum(axis=0)
         # ===== END =====
 
@@ -285,7 +274,7 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         quantized = self.get_semantic_ids(x, x_image=x_image, gumbel_t=gumbel_t)
         embs, residuals = quantized.embeddings, quantized.residuals
         
-        # Decode
+        # Decode using embeddings
         x_hat = self.decode(embs.sum(axis=0))
         
         x_hat = torch.cat(
@@ -293,8 +282,10 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
             axis=-1,
         )
 
-        # Standard losses
-        reconstuction_loss = self.reconstruction_loss(x_hat, x)
+        # Compute reconstruction loss
+        reconstruction_loss = self.reconstruction_loss(x_hat, x)
+        
+        # Quantization loss
         rqvae_loss = quantized.quantize_loss
         
         # ===== TRIPLE-STAGE CONTRASTIVE: Compute all three InfoNCE losses =====
@@ -302,18 +293,15 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
         multiscale_infonce_loss = torch.tensor(0.0, device=x.device)
         cost_infonce_loss = torch.tensor(0.0, device=x.device)
         
-        # 1. Encoder InfoNCE (prevent Level-0 collapse)
         if self.use_encoder_infonce and quantized.encoder_output is not None:
             encoder_infonce_loss = self.encoder_infonce(quantized.encoder_output)
         
-        # 2. Multi-Scale InfoNCE (reduce collisions)
         if self.use_multiscale_infonce and quantized.quantized_per_level is not None:
             multiscale_infonce_loss = self.multiscale_infonce(
                 quantized_list=quantized.quantized_per_level,
                 residual_list=quantized.residuals_per_level
             )
         
-        # 3. CoST InfoNCE (preserve semantics)
         if self.use_cost_infonce and quantized.reconstructed is not None:
             cost_infonce_loss = self.cost_infonce(
                 reconstructed=quantized.reconstructed,
@@ -321,9 +309,9 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
             )
         # ===== END =====
         
-        # Total loss
+        # Total loss with configurable reconstruction weight
         loss = (
-            # reconstuction_loss + 
+            (self.reconstruction_weight * reconstruction_loss if self.use_reconstruction_loss else 0) +
             rqvae_loss + 
             self.encoder_infonce_weight * encoder_infonce_loss +
             self.multiscale_infonce_weight * multiscale_infonce_loss +
@@ -345,7 +333,7 @@ class RqVae(nn.Module, PyTorchModelHubMixin):
 
         return RqVaeComputedLosses(
             loss=loss,
-            reconstruction_loss=reconstuction_loss.mean(),
+            reconstruction_loss=reconstruction_loss.mean(),
             rqvae_loss=rqvae_loss.mean(),
             embs_norm=embs_norm,
             p_unique_ids=p_unique_ids,

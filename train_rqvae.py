@@ -465,12 +465,24 @@ def train(
     infonce_temperature=0.07,
     encoder_infonce_weight=0.1,
     multiscale_infonce_weight=0.3,
+    multiscale_level_weights=None,  # NEW: Hierarchical weights [0.1, 0.4, 1.0]
     cost_infonce_weight=0.2,
     encoder_dropout_rate=0.1,
+    # ===== END =====
+    # ===== Reconstruction Weightage =====
+    use_reconstruction_loss=True,
+    reconstruction_weight=1.0,
     # ===== END =====
     # ===== CROSS-ATTENTION =====
     use_cross_attn=False,
     attn_heads=8,
+    # ===== END =====
+    # ===== PROJECTION HEAD (NEW!) =====
+    # use_projection_head=True,
+    # projection_dim=128,
+    # projection_hidden_dim=64,
+    # projection_use_bn=True,
+    # projection_shared=False,
     # ===== END =====
 ):
 
@@ -596,11 +608,21 @@ def train(
         infonce_temperature=infonce_temperature,
         encoder_infonce_weight=encoder_infonce_weight,
         multiscale_infonce_weight=multiscale_infonce_weight,
+        multiscale_level_weights=multiscale_level_weights,  # NEW: Pass hierarchical weights
+        use_reconstruction_loss=use_reconstruction_loss,
+        reconstruction_weight=reconstruction_weight,
         cost_infonce_weight=cost_infonce_weight,
         encoder_dropout_rate=encoder_dropout_rate,
         use_cross_attn=use_cross_attn,
         attn_heads=attn_heads,
         mixed_precision_type=mixed_precision_type,
+        # ===== PROJECTION HEAD (NEW!) =====
+        # use_projection_head=use_projection_head,
+        # projection_dim=projection_dim,
+        # projection_hidden_dim=projection_hidden_dim,
+        # projection_use_bn=projection_use_bn,
+        # projection_shared=projection_shared,
+        # ===== END =====
     )
     # ===== END =====
     display_model_summary(model, device)
@@ -660,8 +682,16 @@ def train(
     logger.info(f"  CoST InfoNCE:        {use_cost_infonce}")
     if use_encoder_infonce:
         logger.info(f"    - Weight: {encoder_infonce_weight}")
+    if use_reconstruction_loss:
+        logger.info(f"    - Weight: {reconstruction_weight} (Reconstruction Loss Enabled)")
     if use_multiscale_infonce:
         logger.info(f"    - Weight: {multiscale_infonce_weight}")
+        if multiscale_level_weights is not None:
+            logger.info(f"    - Level Weights: {multiscale_level_weights} (HIERARCHICAL)")
+        else:
+            logger.info(f"    - Level Weights: [1.0, 1.0, 1.0] (EQUAL - default)")
+
+
     if use_cost_infonce:
         logger.info(f"    - Weight: {cost_infonce_weight}")
     if use_encoder_infonce or use_multiscale_infonce or use_cost_infonce:
