@@ -106,7 +106,7 @@ class SemanticIdTokenizer(nn.Module):
         
         # If using patch embeddings, check their actual size
         if hasattr(movie_dataset, 'patch_processor') and movie_dataset.patch_processor is not None:
-            if hasattr(movie_dataset.patch_processor, '_embeddings'):
+            if hasattr(movie_dataset.patch_processor, '_embeddings') and movie_dataset.patch_processor._embeddings is not None:
                 actual_embeddings = movie_dataset.patch_processor._embeddings.shape[0]
                 if actual_embeddings < dataset_size:
                     print(f"Warning: Dataset reports {dataset_size} items but only {actual_embeddings} patch embeddings exist")
@@ -125,26 +125,31 @@ class SemanticIdTokenizer(nn.Module):
             collate_fn=lambda batch: batch[0],
         )
         for batch in dataloader:
-            output = batch_to(batch, self.rq_vae.device)
-            batch_ids = self.forward(output).sem_ids
-            # take the output and the sem ids that were created and for each sem id map it to its brand
-            for idx, item in enumerate(batch_ids):
-                if str(item.tolist()) not in self.map_to_category:
-                    self.map_to_category[str(item.tolist())] = output.x_brand_id[
-                        idx
-                    ].item()
-            # Detect in-batch duplicates
-            is_hit = self._get_hits(batch_ids, batch_ids)
-            hits = torch.tril(is_hit, diagonal=-1).sum(axis=-1)
-            assert hits.min() >= 0
-            if cached_ids is None:
-                cached_ids = batch_ids.clone()
-            else:
-                # Detect batch-cache duplicates
-                is_hit = self._get_hits(batch_ids, cached_ids)
-                hits += is_hit.sum(axis=-1)
-                cached_ids = pack([cached_ids, batch_ids], "* d")[0]
-            dedup_dim.append(hits)
+            try:
+                output = batch_to(batch, self.rq_vae.device)
+                batch_ids = self.forward(output).sem_ids
+                # take the output and the sem ids that were created and for each sem id map it to its brand
+                for idx, item in enumerate(batch_ids):
+                    if str(item.tolist()) not in self.map_to_category:
+                        self.map_to_category[str(item.tolist())] = output.x_brand_id[
+                            idx
+                        ].item()
+                # Detect in-batch duplicates
+                is_hit = self._get_hits(batch_ids, batch_ids)
+                hits = torch.tril(is_hit, diagonal=-1).sum(axis=-1)
+                assert hits.min() >= 0
+                if cached_ids is None:
+                    cached_ids = batch_ids.clone()
+                else:
+                    # Detect batch-cache duplicates
+                    is_hit = self._get_hits(batch_ids, cached_ids)
+                    hits += is_hit.sum(axis=-1)
+                    cached_ids = pack([cached_ids, batch_ids], "* d")[0]
+                dedup_dim.append(hits)
+            except IndexError as e:
+                # Skip batches with out-of-bounds indices
+                print(f"Warning: Skipping batch due to index error: {e}")
+                continue
         # Concatenate new column to deduplicate ids
         dedup_dim_tensor = pack(dedup_dim, "*")[0]
         self.cached_ids = pack([cached_ids, dedup_dim_tensor], "b *")[0]

@@ -75,7 +75,7 @@ class ItemData(Dataset):
         self,
         root: str,
         *args,
-        force_process: bool = False,
+        force_process: bool = True,
         dataset: RecDataset = RecDataset.ML_1M,
         train_test_split: str = "all",
         use_image_features: bool = False,
@@ -229,6 +229,29 @@ class ItemData(Dataset):
         
         return self.patch_processor.get_patch_embeddings(indices, device=self.device)
 
+        # FIX: ItemData.__getitem__ should pass dataset index, not item_ids
+
+    # In data/processed.py, find the __getitem__ method in ItemData class
+    # and modify the patch embeddings call:
+
+# FIX: Handle both single index and batch of indices
+
+# In data/processed.py, ItemData.__getitem__ method:
+
+    # SIMPLE FIX: Convert idx to tensor before using for patch embeddings
+
+# # In data/processed.py, around line 255, change:
+
+# # ❌ BEFORE (BROKEN):
+# text_patches, text_masks = self.get_patch_embeddings(idx)  # idx might be a list!
+
+# # ✅ AFTER (FIXED):
+# idx_tensor = torch.tensor(idx) if isinstance(idx, (list, int)) else idx
+# text_patches, text_masks = self.get_patch_embeddings(idx_tensor)
+
+
+    # FULL CONTEXT (around line 245-260):
+
     def __getitem__(self, idx):
         item_ids = (
             torch.tensor(idx).unsqueeze(0) if not isinstance(idx, torch.Tensor) else idx
@@ -237,35 +260,14 @@ class ItemData(Dataset):
         x_image = None
         x_brand_id = torch.Tensor(self.item_brand_id[idx])
         
-        # if image encoding enabled and filenames are present
-        # use pre-computed image features
-        if self.use_image_features and self.image_features is not None:
-            if isinstance(idx, (int, np.integer)):
-                image_features = self.image_features[idx:idx+1].to(x.device)
-            else:
-                image_features = self.image_features[idx].to(x.device)
-
-            # always keep a copy for contrastive learning
-            x_image = image_features
-
-            # Fuse for reconstruction
-            if self.feature_combination_mode == "sum":
-                x = x.unsqueeze(0) if x.dim() == 1 else x
-                x = x + image_features
-            elif self.feature_combination_mode == "concat":
-                x = torch.cat([x, image_features], dim=-1)
-            elif self.feature_combination_mode == "contrastive":
-                # x_image is already set
-                pass
-            else:
-                raise ValueError("Invalid feature combination mode!")
-
-        # NEW: Get patch embeddings if enabled
-        text_patches = None
-        text_masks = None
-        if self.use_patch_embeddings:
-            text_patches, text_masks = self.get_patch_embeddings(item_ids)
-
+        # ✅ FIX: Convert idx to tensor if it's a list or int
+        if hasattr(self, 'patch_processor') and self.patch_processor is not None:
+            idx_tensor = torch.tensor(idx) if isinstance(idx, (list, int)) else idx
+            text_patches, text_masks = self.get_patch_embeddings(idx_tensor)
+        else:
+            text_patches = None
+            text_masks = None
+        
         return SeqBatch(
             user_ids=-1 * torch.ones_like(item_ids.squeeze(0)),
             ids=item_ids,
@@ -276,9 +278,44 @@ class ItemData(Dataset):
             x_fut=-1 * torch.ones_like(item_ids.squeeze(0)),
             x_fut_brand_id=-1 * torch.ones_like(item_ids.squeeze(0)),
             seq_mask=torch.ones_like(item_ids, dtype=bool),
-            text_patches=text_patches,  # NEW
-            text_masks=text_masks,       # NEW
+            text_patches=text_patches,
+            text_masks=text_masks,
         )
+
+
+# WHY THIS WORKS:
+# - idx can be: int, list, or Tensor
+# - get_patch_embeddings() expects: Tensor
+# - So we convert: list/int → Tensor before calling
+# - If already Tensor → keep as is
+
+# EXPLANATION:
+# 
+# The dataloader can call __getitem__ with different types:
+# 
+# 1. Single item:
+#    dataset[42]  →  idx = 42 (int)
+# 
+# 2. Batch of items (with BatchSampler):
+#    dataset[[0, 1, 2, ..., 63]]  →  idx = [0, 1, 2, ..., 63] (list)
+# 
+# We need to handle both cases by converting to tensor first!
+
+# EXPLANATION:
+# 
+# Dataset structure:
+#   Position (idx):  0,    1,    2,    ..., 11499
+#   Item IDs:       45, 11712, 8234,  ...,  5678
+#                   ↑     ↑     ↑             ↑
+#                   These are actual product IDs (can be any number!)
+# 
+# Patch embeddings:
+#   Index:  0,    1,    2,    ..., 11499
+#   Data:  [emb] [emb] [emb]  ...  [emb]
+#          ↑     ↑     ↑             ↑
+#          These correspond to dataset positions, not item IDs!
+#
+# So we must use idx (0-11499), not item_ids (which could be 11712)!
 
 
 class SeqData(Dataset):

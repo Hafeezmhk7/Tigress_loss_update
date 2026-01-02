@@ -125,33 +125,43 @@ def train_iteration(
     optimizer.step()
     accelerator.wait_for_everyone()
 
-    # # compute logs
-    # if accelerator.is_main_process:
-    #     if ((iteration + 1) % log_every == 0 or iteration + 1 == iterations):
-    #         emb_norms_avg = model_output.embs_norm.mean(axis=0)
-    #         emb_norms_avg_log = {
-    #             f"train/emb_avg_norm_{i}": emb_norms_avg[i].cpu().item()
-    #             for i in range(num_codebooks)
-    #         }
-    #         train_log = {
-    #             "train/learning_rate": optimizer.param_groups[0]["lr"],
-    #             "train/total_loss": total_loss.cpu().item(),
-    #             "train/reconstruction_loss": model_output.reconstruction_loss.cpu().item(),
-    #             "train/pqvae_loss": model_output.pqvae_loss.cpu().item(),
-    #             "train/temperature": t,
-    #             "train/p_unique_ids": model_output.p_unique_ids.cpu().item(),
-    #             **emb_norms_avg_log,
-    #         }
+    # compute logs
+    if accelerator.is_main_process:
+        if ((iteration + 1) % log_every == 0 or iteration + 1 == iterations):
+            emb_norms_avg = model_output.embs_norm.mean(axis=0)
             
-            # if use_patch_encoder:
-            #     train_log["train/diversity_loss"] = model_output.diversity_loss.cpu().item()
+            # Handle the case when num_codebooks is 1 (emb_norms_avg becomes a scalar)
+            if emb_norms_avg.dim() == 0:
+                # Single codebook case
+                emb_norms_avg_log = {
+                    f"train/emb_avg_norm_0": emb_norms_avg.cpu().item()
+                }
+            else:
+                # Multiple codebooks case
+                emb_norms_avg_log = {
+                    f"train/emb_avg_norm_{i}": emb_norms_avg[i].cpu().item()
+                    for i in range(num_codebooks)
+                }
+                
+            train_log = {
+                "train/learning_rate": optimizer.param_groups[0]["lr"],
+                "train/total_loss": total_loss.cpu().item(),
+                "train/reconstruction_loss": model_output.reconstruction_loss.cpu().item(),
+                "train/pqvae_loss": model_output.pqvae_loss.cpu().item(),
+                "train/temperature": t,
+                "train/p_unique_ids": model_output.p_unique_ids.cpu().item(),
+                **emb_norms_avg_log,
+            }
             
-            # # print train metrics
-            # display_metrics(metrics=train_log, title="Training Metrics")
+            if use_patch_encoder:
+                train_log["train/diversity_loss"] = model_output.diversity_loss.cpu().item()
             
-            # # log metrics
-            # if wandb_logging:
-            #     wandb.log(train_log, step=iteration+1)
+            # print train metrics
+            display_metrics(metrics=train_log, title="Training Metrics")
+            
+            # log metrics
+            if wandb_logging:
+                wandb.log(train_log, step=iteration+1)
     
     # evaluate model
     if accelerator.is_main_process:
