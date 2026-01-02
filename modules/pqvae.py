@@ -19,8 +19,14 @@ class PqVaeOutput:
     quantized_output: Tensor        # [B, K, D]
     codes: Tensor                   # [B, K] - Semantic IDs!
     decoder_output: Tensor          # [B, output_dim]
-    # embs_norm: Tensor
-    # p_unique_ids: Tensor
+    embs_norm: Tensor
+    p_unique_ids: Tensor
+
+
+@dataclass
+class SemanticIdsOutput:
+    """Output from get_semantic_ids (for tokenizer compatibility)"""
+    sem_ids: Tensor  # [B, K] - Semantic IDs
 
 
 @gin.configurable
@@ -130,8 +136,8 @@ class PqVae(nn.Module):
         
         # Product Quantizer
         self.quantizer = ProductQuantize(
-            embed_dim=patch_token_embed_dim if use_patch_encoder else input_dim,
             num_codebooks=num_codebooks,
+            embed_dim=patch_token_embed_dim if use_patch_encoder else input_dim,
             codebook_size=codebook_size,
             commitment_weight=commitment_weight,
             do_kmeans_init=codebook_kmeans_init,
@@ -173,6 +179,11 @@ class PqVae(nn.Module):
             'patch_token_embed_dim': patch_token_embed_dim,
             'output_dim': output_dim,
         }
+    
+    @property
+    def device(self) -> torch.device:
+        """Get device from model parameters"""
+        return next(self.parameters()).device
     
     def encode(
         self,
@@ -225,12 +236,11 @@ class PqVae(nn.Module):
             codes: [B, K] - Discrete codes (Semantic IDs!)
         """
         # Quantize each token independently with its own codebook
-        quantized, codes,_ = self.quantizer(semantic_tokens, gumbel_t)
-        # quantized: [B, K, token_embed_dim]
+        result = self.quantizer(semantic_tokens, gumbel_t)
+        # result is QuantizeOutput(embeddings, ids, loss)
         
-        # Extract discrete codes
-        # codes = self.quantizer.get_codes(semantic_tokens)
-        # codes: [B, K] - Each element in [0, codebook_size)
+        quantized = result.embeddings  # [B, K, token_embed_dim]
+        codes = result.ids             # [B, K]
         
         return quantized, codes
     
@@ -311,8 +321,8 @@ class PqVae(nn.Module):
             total_loss = total_loss + diversity_loss
         
         # Metrics
-        # embs_norm = self.quantizer.get_codebook_norms()
-        # p_unique_ids = self.quantizer.get_unique_code_usage()
+        embs_norm = self.quantizer.get_codebook_norms()
+        p_unique_ids = self.quantizer.get_unique_code_usage()
         
         return PqVaeOutput(
             loss=total_loss,
@@ -323,8 +333,8 @@ class PqVae(nn.Module):
             quantized_output=quantized_tokens,
             codes=codes,  # Semantic IDs!
             decoder_output=x_hat,
-            # embs_norm=embs_norm,
-            # p_unique_ids=p_unique_ids,
+            embs_norm=embs_norm,
+            p_unique_ids=p_unique_ids,
         )
     
     def get_semantic_ids(
@@ -332,26 +342,38 @@ class PqVae(nn.Module):
         batch,
         text_patches: Optional[Tensor] = None,
         text_mask: Optional[Tensor] = None,
-    ) -> Tensor:
+    ) -> "SemanticIdsOutput":
         """
         Extract semantic IDs for items (for downstream task).
         
         Args:
-            batch: SeqBatch with items
-            text_patches: [B, N, token_dim]
-            text_mask: [B, N]
+            batch: SeqBatch with items OR Tensor [B, input_dim] directly
+            text_patches: [B, N, token_dim] (optional, auto-extracted if batch has it)
+            text_mask: [B, N] (optional, auto-extracted if batch has it)
         
         Returns:
-            codes: [B, K] - Hierarchical semantic IDs
-                           Each row is [code_0, code_1, code_2, code_3]
-                           code_0: Category (most abstract)
-                           code_3: Details (most specific)
+            SemanticIdsOutput with:
+                sem_ids: [B, K] - Hierarchical semantic IDs
+                         Each row is [code_0, code_1, code_2, code_3]
+                         code_0: Category (most abstract)
+                         code_3: Details (most specific)
         """
         with torch.no_grad():
-            x_target = batch.x
+            # Handle both batch object and direct tensor input
+            if isinstance(batch, Tensor):
+                x_target = batch
+            else:
+                x_target = batch.x
+                # Auto-extract patches if available and not explicitly provided
+                if text_patches is None and hasattr(batch, 'text_patches'):
+                    text_patches = batch.text_patches
+                if text_mask is None and hasattr(batch, 'text_masks'):
+                    text_mask = batch.text_masks
+            
             semantic_tokens, _ = self.encode(x_target, text_patches, text_mask)
             _, codes = self.quantize(semantic_tokens, gumbel_t=0.0)
-        return codes
+        
+        return SemanticIdsOutput(sem_ids=codes)
     
     def reconstruct_from_codes(
         self,

@@ -1,3 +1,14 @@
+"""
+PATCHED SemanticIdTokenizer for Hierarchical PQ-VAE
+
+This patch fixes the tokenizer to pass the whole batch (including text_patches)
+to get_semantic_ids() instead of just batch.x.
+
+Key changes:
+- Line 168: Changed from `self.rq_vae.get_semantic_ids(batch.x)` 
+            to `self.rq_vae.get_semantic_ids(batch)`
+"""
+
 import math
 import torch
 
@@ -57,7 +68,6 @@ class SemanticIdTokenizer(nn.Module):
             commitment_weight=commitment_weight,
             use_cross_attn=use_cross_attn,
             attn_heads=attn_heads,
-            # use_projection_head=use_projection_head,  # ← ADD THIS
             mixed_precision_type=mixed_precision_type,
         )
 
@@ -90,8 +100,21 @@ class SemanticIdTokenizer(nn.Module):
     def precompute_corpus_ids(self, movie_dataset: ItemData) -> Tensor:
         cached_ids = None
         dedup_dim = []
+        
+        # Determine safe dataset size
+        dataset_size = len(movie_dataset)
+        
+        # If using patch embeddings, check their actual size
+        if hasattr(movie_dataset, 'patch_processor') and movie_dataset.patch_processor is not None:
+            if hasattr(movie_dataset.patch_processor, '_embeddings'):
+                actual_embeddings = movie_dataset.patch_processor._embeddings.shape[0]
+                if actual_embeddings < dataset_size:
+                    print(f"Warning: Dataset reports {dataset_size} items but only {actual_embeddings} patch embeddings exist")
+                    print(f"Using {actual_embeddings} items to avoid IndexError")
+                    dataset_size = actual_embeddings
+        
         sampler = BatchSampler(
-            SequentialSampler(range(len(movie_dataset))),
+            SequentialSampler(range(dataset_size)),
             batch_size=512,
             drop_last=False,
         )
@@ -165,7 +188,9 @@ class SemanticIdTokenizer(nn.Module):
         # Else block has to return deduped 4-sized ids for use in decoder training.
         if self.cached_ids is None or batch.ids.max() >= self.cached_ids.shape[0]:
             B, N = batch.ids.shape
-            sem_ids = self.rq_vae.get_semantic_ids(batch.x).sem_ids
+            # ✅ PATCHED: Pass whole batch instead of just batch.x
+            # This allows get_semantic_ids() to auto-extract text_patches
+            sem_ids = self.rq_vae.get_semantic_ids(batch).sem_ids
             D = sem_ids.shape[-1]
             seq_mask, sem_ids_fut = None, None
         else:

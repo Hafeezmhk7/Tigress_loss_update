@@ -37,7 +37,7 @@ train.learning_rate=1e-3
 train.weight_decay=0.0
 train.gradient_accumulate_every=1
 train.save_model_every=5000
-train.eval_every=5000
+train.eval_every=100
 train.log_every=100
 
 # Logging

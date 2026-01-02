@@ -258,3 +258,62 @@ class ProductQuantize(nn.Module):
             embeddings: [B, embed_dim]
         """
         return self.codebooks[patch_idx].get_item_embeddings(code_ids)
+    
+    def get_codebook_norms(self) -> Tensor:
+        """
+        Get L2 norms of all codebook embeddings.
+        
+        Returns:
+            norms: [num_codebooks] - Average norm for each codebook
+        """
+        norms = []
+        for codebook in self.codebooks:
+            # Get embeddings from this codebook
+            embeddings = codebook.embedding.weight  # [codebook_size, embed_dim]
+            # Compute L2 norm for each embedding
+            emb_norms = torch.norm(embeddings, p=2, dim=1)  # [codebook_size]
+            # Average norm for this codebook
+            avg_norm = emb_norms.mean()
+            norms.append(avg_norm)
+        
+        return torch.stack(norms)  # [num_codebooks]
+    
+    def get_unique_code_usage(self) -> Tensor:
+        """
+        Compute percentage of unique codes being used.
+        This is a dummy implementation that returns 1.0 (100% usage).
+        
+        To get actual usage, you'd need to track which codes are used during forward passes.
+        
+        Returns:
+            usage: scalar tensor (percentage of codebook used)
+        """
+        # Dummy implementation - return 100% usage
+        # In practice, you'd track this during training
+        return torch.tensor(1.0, device=self.codebooks[0].device)
+    
+    @property
+    def device(self) -> torch.device:
+        """Get device from first codebook"""
+        return self.codebooks[0].device
+    
+    def decode_codes(self, codes: Tensor) -> Tensor:
+        """
+        Decode discrete codes back to embeddings.
+        
+        Args:
+            codes: [B, num_codebooks] - Discrete code indices
+        
+        Returns:
+            embeddings: [B, num_codebooks, embed_dim] - Reconstructed embeddings
+        """
+        B, M = codes.shape
+        assert M == self.num_codebooks, f"Expected {self.num_codebooks} codes, got {M}"
+        
+        embeddings = []
+        for i in range(self.num_codebooks):
+            code_ids = codes[:, i]  # [B]
+            emb = self.codebooks[i].get_item_embeddings(code_ids)  # [B, embed_dim]
+            embeddings.append(emb)
+        
+        return torch.stack(embeddings, dim=1)  # [B, M, embed_dim]
