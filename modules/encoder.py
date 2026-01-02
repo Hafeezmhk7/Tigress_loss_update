@@ -1,12 +1,19 @@
 import torch
 from modules.normalize import L2NormalizationLayer
-from typing import List
+from typing import List, Optional, Tuple
 from torch import nn
 from torch import Tensor
 import torch.nn.functional as F
 
 
+# =============================================================================
+# LEGACY: MLP (needed by rqvae.py and other modules)
+# =============================================================================
+
 class MLP(nn.Module):
+    """
+    Legacy MLP encoder (for RQ-VAE and backward compatibility)
+    """
     def __init__(
         self,
         input_dim: int,
@@ -40,247 +47,375 @@ class MLP(nn.Module):
         return self.mlp(x)
 
 
-class PatchEncoder(nn.Module):
+# =============================================================================
+# NEW: Hierarchical Patch Encoder for PQ-VAE
+# =============================================================================
+
+class HierarchicalPatchEncoder(nn.Module):
     """
-    Patch-based encoder that downsamples N token embeddings to K semantic patches.
+    Hierarchical Patch Encoder for Semantic ID Generation
     
-    Input:  [B, N_tokens, token_dim]  (e.g., [B, 77, 768] for CLIP)
-    Output: [B, K_patches, patch_dim]  (e.g., [B, 4, 32])
+    Key Innovation: Sequential conditioning for hierarchical semantics
     
-    Architecture:
-    1. Token Projection: [token_dim] → [hidden_dim] (working dimension)
-    2. Cross-Attention: K learnable queries attend to all tokens
-    3. Patch Processing: [hidden_dim] → [...] → [patch_dim]
+    Architecture (Based on VQ-VAE-2 + TIGER):
+    1. Self-attention: Build contextual token representations
+    2. Hierarchical extraction: Each semantic token conditioned on previous
+       - Token 0: Category (most abstract)
+       - Token 1: Subcategory (conditioned on token 0)
+       - Token 2: Attributes (conditioned on tokens 0,1)
+       - Token 3: Details (conditioned on tokens 0,1,2)
+    3. Independent quantization: Each token gets own codebook
+    
+    This creates hierarchical codes perfect for:
+    - Autoregressive generation (predict next item's codes sequentially)
+    - Semantic understanding (each level captures different abstraction)
+    - Product quantization (independent codebooks)
+    
+    Input:  [B, N_tokens, token_dim]      e.g., [B, 77, 1024]
+    Output: [B, num_codebooks, token_embed_dim]  e.g., [B, 4, 192]
     """
     
     def __init__(
         self,
-        token_dim: int = 768,
-        num_patches: int = 4,
-        patch_dim: int = 32,
-        hidden_dim: int = 256,
-        num_heads: int = 4,
+        token_dim: int = 1024,
+        num_codebooks: int = 4,
+        token_embed_dim: int = 192,
+        hidden_dim: int = 512,
+        num_heads: int = 8,
+        num_layers: int = 2,
         dropout: float = 0.1,
-        diversity_loss_weight: float = 0.1,
+        use_diversity_loss: bool = True,
+        diversity_weight: float = 0.01,
     ) -> None:
         super().__init__()
         
         self.token_dim = token_dim
-        self.num_patches = num_patches
-        self.patch_dim = patch_dim
+        self.num_codebooks = num_codebooks
+        self.token_embed_dim = token_embed_dim
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
-        self.diversity_loss_weight = diversity_loss_weight
+        self.num_layers = num_layers
+        self.use_diversity_loss = use_diversity_loss
+        self.diversity_weight = diversity_weight
         
-        # Learnable queries for patch selection
-        self.patch_queries = nn.Parameter(torch.randn(1, num_patches, hidden_dim))
-        nn.init.xavier_uniform_(self.patch_queries)
+        # Total output dimension
+        self.output_dim = num_codebooks * token_embed_dim
         
-        # Token projection to working dimension
-        self.token_proj = nn.Linear(token_dim, hidden_dim, bias=False)
+        # Input projection: token_dim → hidden_dim
+        self.input_proj = nn.Linear(token_dim, hidden_dim, bias=False)
+        self.input_norm = nn.LayerNorm(hidden_dim)
         
-        # Multi-head cross-attention for patch selection
-        self.cross_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
+        # Self-attention layers (process all tokens)
+        self.self_attn_layers = nn.ModuleList([
+            nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=num_heads,
+                dim_feedforward=hidden_dim * 2,
+                dropout=dropout,
+                activation='gelu',
+                batch_first=True,
+                norm_first=True,
+            )
+            for _ in range(num_layers)
+        ])
         
-        # Patch processing MLP (similar depth to TIGER's encoder)
-        self.patch_processor = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2, bias=False),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4, bias=False),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 4, patch_dim, bias=False),
-        )
+        # Hierarchical learnable queries (one per codebook level)
+        self.semantic_queries = nn.ParameterList([
+            nn.Parameter(torch.randn(1, 1, hidden_dim))
+            for _ in range(num_codebooks)
+        ])
+        for query in self.semantic_queries:
+            nn.init.xavier_uniform_(query)
         
-        # Layer norms
-        self.norm_tokens = nn.LayerNorm(hidden_dim)
-        self.norm_patches = nn.LayerNorm(hidden_dim)
+        # Conditioning modules (project previous tokens for next query)
+        self.conditioning_modules = nn.ModuleList([
+            nn.Identity()  # Level 0: no conditioning
+        ] + [
+            nn.Linear(hidden_dim * i, hidden_dim, bias=False)
+            for i in range(1, num_codebooks)
+        ])
+        
+        # Cross-attention layers (one per level)
+        self.cross_attention_layers = nn.ModuleList([
+            nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            for _ in range(num_codebooks)
+        ])
+        
+        # Layer norms for each level
+        self.cross_attn_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim)
+            for _ in range(num_codebooks)
+        ])
+        
+        # Feed-forward for each semantic token
+        self.token_ffns = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim, bias=False),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim, bias=False),
+            )
+            for _ in range(num_codebooks)
+        ])
+        self.token_ffn_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim)
+            for _ in range(num_codebooks)
+        ])
+        
+        # Final projections (to token_embed_dim)
+        self.output_projs = nn.ModuleList([
+            nn.Linear(hidden_dim, token_embed_dim, bias=False)
+            for _ in range(num_codebooks)
+        ])
         
     def forward(
         self, 
         token_embeddings: Tensor, 
-        attention_mask: Tensor = None
-    ) -> tuple[Tensor, Tensor]:
+        attention_mask: Optional[Tensor] = None
+    ) -> Tuple[Tensor, Optional[Tensor]]:
         """
+        Hierarchical encoding with sequential conditioning.
+        
         Args:
-            token_embeddings: [B, N_tokens, token_dim] - Token embeddings from pretrained model
-            attention_mask: [B, N_tokens] - Mask for valid tokens (1 = valid, 0 = padding)
+            token_embeddings: [B, N, token_dim] - Patch embeddings
+            attention_mask: [B, N] - Attention mask
             
         Returns:
-            patches: [B, num_patches, patch_dim] - Semantic patches
-            diversity_loss: scalar - Loss to encourage diverse attention patterns
+            semantic_tokens: [B, num_codebooks, token_embed_dim]
+            diversity_loss: scalar or None
         """
         B, N, D = token_embeddings.shape
-        assert D == self.token_dim, f"Expected token_dim={self.token_dim}, got {D}"
+        assert D == self.token_dim
         
-        # Project tokens to working dimension [B, N, hidden_dim]
-        tokens = self.token_proj(token_embeddings)
-        tokens = self.norm_tokens(tokens)
+        # Step 1: Project and self-attention
+        x = self.input_proj(token_embeddings)
+        x = self.input_norm(x)
         
-        # Expand learnable queries for batch [B, num_patches, hidden_dim]
-        queries = self.patch_queries.expand(B, -1, -1)
-        
-        # Convert attention_mask to key_padding_mask format (True = ignore)
+        key_padding_mask = None
         if attention_mask is not None:
-            key_padding_mask = ~attention_mask.bool()  # Invert: 0 = valid, 1 = ignore
-        else:
-            key_padding_mask = None
+            key_padding_mask = ~attention_mask.bool()
         
-        # Cross-attention: queries attend to all tokens
-        # Output: [B, num_patches, hidden_dim]
-        patches, attention_weights = self.cross_attention(
-            query=queries,
-            key=tokens,
-            value=tokens,
-            key_padding_mask=key_padding_mask,
-            need_weights=True,
-            average_attn_weights=False,  # Get per-head weights for diversity loss
-        )
+        for layer in self.self_attn_layers:
+            x = layer(x, src_key_padding_mask=key_padding_mask)
+        # x: [B, N, hidden_dim] - contextual tokens
         
-        patches = self.norm_patches(patches)
+        # Step 2: Hierarchical token extraction
+        semantic_tokens = []
+        attention_weights_list = []
         
-        # Process patches through MLP [B, num_patches, patch_dim]
-        patches = self.patch_processor(patches)
+        for level in range(self.num_codebooks):
+            # Get base query for this level
+            query = self.semantic_queries[level].expand(B, 1, -1)
+            
+            # Condition on previous tokens (hierarchical dependency)
+            if level > 0:
+                # Concatenate all previous semantic tokens
+                prev_tokens = torch.cat(semantic_tokens, dim=1)  # [B, level, hidden_dim]
+                prev_tokens_flat = prev_tokens.reshape(B, -1)  # [B, level * hidden_dim]
+                
+                # Condition query on previous tokens
+                conditioning = self.conditioning_modules[level](prev_tokens_flat)  # [B, hidden_dim]
+                query = query + conditioning.unsqueeze(1)  # Additive conditioning
+            
+            # Cross-attention: conditioned query attends to all input tokens
+            semantic_token, attn_weights = self.cross_attention_layers[level](
+                query=query,
+                key=x,
+                value=x,
+                key_padding_mask=key_padding_mask,
+                need_weights=True,
+                average_attn_weights=False,
+            )
+            # semantic_token: [B, 1, hidden_dim]
+            # attn_weights: [B, num_heads, 1, N]
+            
+            semantic_token = self.cross_attn_norms[level](query + semantic_token)
+            
+            # Feed-forward
+            semantic_token = self.token_ffn_norms[level](
+                semantic_token + self.token_ffns[level](semantic_token)
+            )
+            
+            semantic_tokens.append(semantic_token)
+            attention_weights_list.append(attn_weights)
         
-        # Compute diversity loss to encourage different patches to attend to different tokens
-        diversity_loss = self._compute_diversity_loss(attention_weights, attention_mask)
+        # Step 3: Stack and project
+        semantic_tokens = torch.cat(semantic_tokens, dim=1)  # [B, K, hidden_dim]
         
-        return patches, diversity_loss
+        # Project each token independently
+        output_tokens = []
+        for level in range(self.num_codebooks):
+            token = semantic_tokens[:, level:level+1, :]  # [B, 1, hidden_dim]
+            projected = self.output_projs[level](token)   # [B, 1, token_embed_dim]
+            output_tokens.append(projected)
+        
+        output_tokens = torch.cat(output_tokens, dim=1)  # [B, K, token_embed_dim]
+        
+        # Step 4: Diversity loss
+        diversity_loss = None
+        if self.use_diversity_loss:
+            diversity_loss = self._compute_diversity_loss(
+                attention_weights_list, attention_mask
+            )
+        
+        return output_tokens, diversity_loss
     
     def _compute_diversity_loss(
-        self, 
-        attention_weights: Tensor, 
-        attention_mask: Tensor = None
+        self,
+        attention_weights_list: List[Tensor],
+        attention_mask: Optional[Tensor] = None
     ) -> Tensor:
         """
-        Encourage different patches to attend to different tokens.
-        
-        Args:
-            attention_weights: [B, num_heads, num_patches, N_tokens]
-            attention_mask: [B, N_tokens]
-            
-        Returns:
-            diversity_loss: scalar
+        Encourage different semantic tokens to attend to different regions.
         """
-        # Average over heads: [B, num_patches, N_tokens]
-        attn = attention_weights.mean(dim=1)
+        # Stack and average over heads
+        attns = [a.mean(dim=1) for a in attention_weights_list]
+        attn = torch.cat(attns, dim=1)  # [B, K, N]
         
-        # Mask out padding tokens if mask is provided
+        # Mask padding
         if attention_mask is not None:
-            # Expand mask: [B, 1, N_tokens]
             mask = attention_mask.unsqueeze(1).float()
             attn = attn * mask
-            # Renormalize
             attn = attn / (attn.sum(dim=-1, keepdim=True) + 1e-8)
         
-        # Compute pairwise cosine similarity between patch attention patterns
-        # Normalize attention vectors
-        attn_norm = F.normalize(attn, p=2, dim=-1)  # [B, num_patches, N_tokens]
-        
-        # Compute similarity matrix: [B, num_patches, num_patches]
+        # Compute pairwise similarity
+        attn_norm = F.normalize(attn, p=2, dim=-1)
         similarity = torch.bmm(attn_norm, attn_norm.transpose(1, 2))
         
-        # Take upper triangular part (excluding diagonal) to avoid double-counting
+        # Upper triangular (exclude diagonal)
         mask = torch.triu(torch.ones_like(similarity[0]), diagonal=1).bool()
         
-        # Average similarity across batch
         diversity_loss = similarity[:, mask].mean()
-        
-        # Apply weight
-        diversity_loss = self.diversity_loss_weight * diversity_loss
+        diversity_loss = self.diversity_weight * diversity_loss
         
         return diversity_loss
 
 
-class HybridEncoder(nn.Module):
+# =============================================================================
+# NEW: Cross-Attention Decoder
+# =============================================================================
+
+class CrossAttentionDecoder(nn.Module):
     """
-    Hybrid encoder that combines patch-based text encoding with global image encoding.
+    Cross-Attention Decoder (Preserves Token Structure!)
     
-    Text: PatchEncoder on tokens → [B, K_text, patch_dim]
-    Image: MLP on global → [B, 1, patch_dim]
-    Output: Concatenate → [B, K_text + 1, patch_dim]
+    Based on VQ-VAE principle: Decoder operates on quantized latent structure.
+    
+    Architecture:
+    - Global learnable query
+    - Attends to all K quantized semantic tokens
+    - Projects to target dimension (global embedding)
+    
+    Input:  [B, K, token_embed_dim]  e.g., [B, 4, 192]
+    Output: [B, output_dim]          e.g., [B, 768]
     """
     
     def __init__(
         self,
-        text_token_dim: int = 768,
-        image_global_dim: int = 768,
-        num_text_patches: int = 4,
-        patch_dim: int = 32,
-        hidden_dim: int = 256,
-        num_heads: int = 4,
+        input_dim: int = 192,        # token_embed_dim
+        num_tokens: int = 4,          # num_codebooks
+        hidden_dim: int = 512,
+        output_dim: int = 768,
+        num_heads: int = 8,
+        num_layers: int = 2,
         dropout: float = 0.1,
-        diversity_loss_weight: float = 0.1,
-    ) -> None:
+    ):
         super().__init__()
         
-        self.num_text_patches = num_text_patches
-        self.patch_dim = patch_dim
+        self.input_dim = input_dim
+        self.num_tokens = num_tokens
+        self.total_dim = num_tokens * input_dim
         
-        # Text patch encoder
-        self.text_patch_encoder = PatchEncoder(
-            token_dim=text_token_dim,
-            num_patches=num_text_patches,
-            patch_dim=patch_dim,
-            hidden_dim=hidden_dim,
-            num_heads=num_heads,
-            dropout=dropout,
-            diversity_loss_weight=diversity_loss_weight,
+        # Learnable global query
+        self.global_query = nn.Parameter(torch.randn(1, 1, hidden_dim))
+        nn.init.xavier_uniform_(self.global_query)
+        
+        # Project tokens to hidden dimension
+        self.token_proj = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.token_norm = nn.LayerNorm(hidden_dim)
+        
+        # Cross-attention layers
+        self.cross_attn_layers = nn.ModuleList([
+            nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            for _ in range(num_layers)
+        ])
+        
+        self.cross_attn_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim)
+            for _ in range(num_layers)
+        ])
+        
+        # Feed-forward layers
+        self.ffns = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim * 2, bias=False),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim * 2, hidden_dim, bias=False),
+            )
+            for _ in range(num_layers)
+        ])
+        
+        self.ffn_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim)
+            for _ in range(num_layers)
+        ])
+        
+        # Output projection
+        self.output_proj = nn.Sequential(
+            nn.Linear(hidden_dim, output_dim, bias=False),
         )
         
-        # Image global encoder (simple MLP to match patch_dim)
-        self.image_encoder = nn.Sequential(
-            nn.Linear(image_global_dim, hidden_dim, bias=False),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, patch_dim, bias=False),
-        )
-        
-    def forward(
-        self,
-        text_token_embeddings: Tensor = None,
-        text_attention_mask: Tensor = None,
-        image_global_embedding: Tensor = None,
-    ) -> tuple[Tensor, Tensor]:
+    def forward(self, quantized_tokens: Tensor) -> Tensor:
         """
+        Decode from quantized semantic tokens.
+        
         Args:
-            text_token_embeddings: [B, N_tokens, text_token_dim]
-            text_attention_mask: [B, N_tokens]
-            image_global_embedding: [B, image_global_dim]
+            quantized_tokens: [B, K, token_embed_dim]
             
         Returns:
-            combined_patches: [B, K_text + K_image, patch_dim]
-            diversity_loss: scalar
+            output: [B, output_dim] - Reconstructed global embedding
         """
-        patches_list = []
-        total_diversity_loss = 0.0
+        B, K, D = quantized_tokens.shape
+        assert K == self.num_tokens
+        assert D == self.input_dim
         
-        # Process text if provided
-        if text_token_embeddings is not None:
-            text_patches, text_diversity_loss = self.text_patch_encoder(
-                text_token_embeddings, text_attention_mask
+        # Project tokens to hidden dimension
+        tokens = self.token_proj(quantized_tokens)
+        tokens = self.token_norm(tokens)
+        # tokens: [B, K, hidden_dim]
+        
+        # Expand global query
+        query = self.global_query.expand(B, 1, -1)
+        
+        # Multiple cross-attention layers
+        for i in range(len(self.cross_attn_layers)):
+            # Cross-attention
+            output, _ = self.cross_attn_layers[i](
+                query=query,
+                key=tokens,
+                value=tokens,
+                need_weights=False,
             )
-            patches_list.append(text_patches)
-            total_diversity_loss += text_diversity_loss
+            query = self.cross_attn_norms[i](query + output)
+            
+            # Feed-forward
+            query = self.ffn_norms[i](query + self.ffns[i](query))
         
-        # Process image if provided
-        if image_global_embedding is not None:
-            # Encode image to patch_dim: [B, image_global_dim] → [B, patch_dim]
-            image_patch = self.image_encoder(image_global_embedding)
-            # Add patch dimension: [B, patch_dim] → [B, 1, patch_dim]
-            image_patch = image_patch.unsqueeze(1)
-            patches_list.append(image_patch)
+        # query: [B, 1, hidden_dim]
         
-        # Concatenate all patches along patch dimension
-        if len(patches_list) > 0:
-            combined_patches = torch.cat(patches_list, dim=1)
-        else:
-            raise ValueError("At least one of text or image must be provided")
+        # Project to output dimension
+        output = self.output_proj(query.squeeze(1))
+        # output: [B, output_dim]
         
-        return combined_patches, total_diversity_loss
+        return output

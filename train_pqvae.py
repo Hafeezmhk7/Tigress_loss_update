@@ -125,33 +125,33 @@ def train_iteration(
     optimizer.step()
     accelerator.wait_for_everyone()
 
-    # compute logs
-    if accelerator.is_main_process:
-        if ((iteration + 1) % log_every == 0 or iteration + 1 == iterations):
-            emb_norms_avg = model_output.embs_norm.mean(axis=0)
-            emb_norms_avg_log = {
-                f"train/emb_avg_norm_{i}": emb_norms_avg[i].cpu().item()
-                for i in range(num_codebooks)
-            }
-            train_log = {
-                "train/learning_rate": optimizer.param_groups[0]["lr"],
-                "train/total_loss": total_loss.cpu().item(),
-                "train/reconstruction_loss": model_output.reconstruction_loss.cpu().item(),
-                "train/pqvae_loss": model_output.pqvae_loss.cpu().item(),
-                "train/temperature": t,
-                "train/p_unique_ids": model_output.p_unique_ids.cpu().item(),
-                **emb_norms_avg_log,
-            }
+    # # compute logs
+    # if accelerator.is_main_process:
+    #     if ((iteration + 1) % log_every == 0 or iteration + 1 == iterations):
+    #         emb_norms_avg = model_output.embs_norm.mean(axis=0)
+    #         emb_norms_avg_log = {
+    #             f"train/emb_avg_norm_{i}": emb_norms_avg[i].cpu().item()
+    #             for i in range(num_codebooks)
+    #         }
+    #         train_log = {
+    #             "train/learning_rate": optimizer.param_groups[0]["lr"],
+    #             "train/total_loss": total_loss.cpu().item(),
+    #             "train/reconstruction_loss": model_output.reconstruction_loss.cpu().item(),
+    #             "train/pqvae_loss": model_output.pqvae_loss.cpu().item(),
+    #             "train/temperature": t,
+    #             "train/p_unique_ids": model_output.p_unique_ids.cpu().item(),
+    #             **emb_norms_avg_log,
+    #         }
             
-            if use_patch_encoder:
-                train_log["train/diversity_loss"] = model_output.diversity_loss.cpu().item()
+            # if use_patch_encoder:
+            #     train_log["train/diversity_loss"] = model_output.diversity_loss.cpu().item()
             
-            # print train metrics
-            display_metrics(metrics=train_log, title="Training Metrics")
+            # # print train metrics
+            # display_metrics(metrics=train_log, title="Training Metrics")
             
-            # log metrics
-            if wandb_logging:
-                wandb.log(train_log, step=iteration+1)
+            # # log metrics
+            # if wandb_logging:
+            #     wandb.log(train_log, step=iteration+1)
     
     # evaluate model
     if accelerator.is_main_process:
@@ -268,22 +268,32 @@ def train(
     vae_codebook_normalize=False,
     vae_codebook_mode=QuantizeForwardMode.ROTATION_TRICK,
     vae_sim_vq=False,
-    num_codebooks=4,  # Number of independent codebooks (patches)
+    num_codebooks=4,
     dataset_split="beauty",
     use_image_features=False,
     feature_combination_mode="sum",
     run_prefix="",
     debug=False,
-    # Patch-based parameters
+    # Patch-based parameters (hierarchical)
     use_patch_encoder=False,
-    patch_num_patches=4,
-    patch_hidden_dim=256,
-    patch_num_heads=4,
+    patch_token_dim=1024,                # NEW: Input patch dimension
+    patch_token_embed_dim=192,           # NEW: Dimension per semantic token
+    patch_hidden_dim=512,                # NEW: Processing dimension
+    patch_num_heads=8,                   # NEW: Attention heads
+    patch_num_layers=2,                  # NEW: Self-attention layers
     patch_dropout=0.1,
-    patch_diversity_weight=0.1,
+    patch_diversity_weight=0.01,         # NEW: Diversity loss weight
     patch_hybrid_mode=False,
+    patch_num_text_codebooks=3,          # NEW: For hybrid mode
+    patch_num_image_codebooks=1,         # NEW: For hybrid mode
+    # Decoder parameters (hierarchical)
+    decoder_hidden_dim=512,              # NEW: Decoder hidden dimension
+    decoder_num_layers=2,                # NEW: Decoder layers
+    decoder_num_heads=8,                 # NEW: Decoder attention heads
+    decoder_dropout=0.1,                 # NEW: Decoder dropout
+    decoder_output_dim=768,              # NEW: Decoder output dimension
     # Patch embeddings parameters (for ItemData)
-    use_patch_embeddings=False,  # Enable automatic patch processing in ItemData
+    use_patch_embeddings=False,
     patch_model_name="sentence-transformers/sentence-t5-xl",
     patch_max_seq_length=77,
 ):
@@ -293,7 +303,7 @@ def train(
     logger.info(f"Session Started with UID '{uid}' | Dataset '{dataset_folder}' | Split '{dataset_split}'")
     if use_patch_encoder:
         logger.info(f"[PATCH MODE] Using Product Quantization with {num_codebooks} independent codebooks")
-        logger.info(f"[PATCH MODE] Automatic patch processing: {use_patch_embeddings}")
+        logger.info(f"[HIERARCHICAL] Automatic patch processing: {use_patch_embeddings}")
     log_dir = os.path.join(os.path.expanduser("~"), log_dir, dataset_split, uid)
     os.makedirs(log_dir, exist_ok=True)
     
@@ -308,7 +318,7 @@ def train(
     # logging
     if wandb_logging and accelerator.is_main_process:
         params = locals()
-        mode_suffix = "-pq-patch" if use_patch_encoder else "-pq"
+        mode_suffix = "-pq-hierarchical" if use_patch_encoder else "-pq"
         run_name = f"pq-vae{mode_suffix}-{dataset.name.lower()}-{dataset_split}" + "/" + uid
         if run_prefix:
             run_name = f"{run_prefix}-{run_name}"
@@ -327,7 +337,7 @@ def train(
         use_image_features=use_image_features,
         feature_combination_mode=feature_combination_mode,
         device=device,
-        # NEW: Enable automatic patch processing
+        # Enable automatic patch processing
         use_patch_embeddings=use_patch_embeddings,
         patch_model_name=patch_model_name,
         patch_max_seq_length=patch_max_seq_length,
@@ -353,7 +363,6 @@ def train(
         use_image_features=use_image_features,
         feature_combination_mode=feature_combination_mode,
         device=device,
-        # NEW: Enable automatic patch processing
         use_patch_embeddings=use_patch_embeddings,
         patch_model_name=patch_model_name,
         patch_max_seq_length=patch_max_seq_length,
@@ -378,7 +387,6 @@ def train(
             use_image_features=use_image_features,
             feature_combination_mode=feature_combination_mode,
             device=device,
-            # NEW: Enable automatic patch processing
             use_patch_embeddings=use_patch_embeddings,
             patch_model_name=patch_model_name,
             patch_max_seq_length=patch_max_seq_length,
@@ -391,6 +399,7 @@ def train(
     
     model = PqVae(
         input_dim=vae_input_dim,
+        output_dim=decoder_output_dim,
         embed_dim=vae_embed_dim,
         hidden_dims=vae_hidden_dims,
         codebook_size=vae_codebook_size,
@@ -401,14 +410,24 @@ def train(
         num_codebooks=num_codebooks,
         n_cat_features=vae_n_cat_feats,
         commitment_weight=commitment_weight,
-        # Patch parameters
+        # Hierarchical patch parameters
         use_patch_encoder=use_patch_encoder,
-        patch_num_patches=patch_num_patches,
+        patch_token_dim=patch_token_dim,
+        patch_token_embed_dim=patch_token_embed_dim,
         patch_hidden_dim=patch_hidden_dim,
         patch_num_heads=patch_num_heads,
+        patch_num_layers=patch_num_layers,
         patch_dropout=patch_dropout,
-        patch_diversity_weight=patch_diversity_weight,
+        use_diversity_loss=True,
+        diversity_weight=patch_diversity_weight,
         patch_hybrid_mode=patch_hybrid_mode,
+        patch_num_text_codebooks=patch_num_text_codebooks,
+        patch_num_image_codebooks=patch_num_image_codebooks,
+        # Decoder parameters
+        decoder_hidden_dim=decoder_hidden_dim,
+        decoder_num_layers=decoder_num_layers,
+        decoder_num_heads=decoder_num_heads,
+        decoder_dropout=decoder_dropout,
     )
     display_model_summary(model, device)
 

@@ -81,7 +81,6 @@ class ItemData(Dataset):
         use_image_features: bool = False,
         feature_combination_mode: str = "sum",
         device: str = "cpu",
-        # NEW: Patch embedding parameters
         use_patch_embeddings: bool = False,
         patch_model_name: str = "sentence-transformers/sentence-t5-xl",
         patch_max_seq_length: int = 77,
@@ -89,7 +88,7 @@ class ItemData(Dataset):
     ) -> None:
 
         self.use_image_features = use_image_features
-        self.use_patch_embeddings = use_patch_embeddings  # NEW
+        self.use_patch_embeddings = use_patch_embeddings
         self.root = root
         self.device = device
         self.feature_combination_mode = feature_combination_mode
@@ -109,50 +108,19 @@ class ItemData(Dataset):
         elif train_test_split == "all":
             filt = torch.ones_like(raw_data.data["item"]["x"][:, 0], dtype=bool)
 
+        # Load item data FIRST
         self.item_data, self.item_text, self.item_brand_id = (
             raw_data.data["item"]["x"][filt],
             raw_data.data["item"]["text"][filt],
             raw_data.data["item"]["brand_id"][filt],
         )
+        
+        # Set dataset_split SECOND
         self.dataset_split = kwargs.get("split")
         logger.info(f"For `{self.dataset_split}` using the datapath: {processed_data_path}")
 
-        # ========================================
-        # IMAGE FEATURES (existing code)
-        # ========================================
-        if self.use_image_features:
-            with open(os.path.join(self.root, "raw", self.dataset_split, "datamaps.json"), "r") as f:
-                self.data_maps = json.load(f)
-
-            # image features path
-            features_path = os.path.join(
-                self.root, "processed", f"{self.dataset_split}_{train_test_split}_item_img_feats.pt"
-            )
-            # load pre-computed image features
-            if os.path.exists(features_path) and not force_process:
-                logger.info(f"Loading precomputed image features from {features_path}")
-                self.image_features = torch.load(features_path, map_location="cpu")
-                logger.info(f"Loaded image features {self.image_features.shape}")
-            else:
-                # pre-compute all image features
-                self.image_features = self._precompute_image_features()
-                os.makedirs(os.path.dirname(features_path), exist_ok=True)
-                torch.save(self.image_features, features_path)
-
-# =============================================================================
-# COMPLETE REPLACEMENT for data/processed.py patch processing section
-# Lines ~145-185 in your data/processed.py
-# =============================================================================
-# This fixes: ValueError: Expected object or value
-# Cause: pd.read_json() can't read .gz files directly
-# Solution: Use gzip.open() + json.loads() like rest of codebase
-# =============================================================================
-
-        # ========================================
-        # PATCH EMBEDDINGS (following image features pattern)
-        # ========================================
+        # NOW process patches THIRD (uses self.dataset_split and self.item_text)
         if self.use_patch_embeddings:
-            # Initialize patch processor
             self.patch_processor = PatchEmbeddingProcessor(
                 processed_dir=os.path.join(self.root, "processed"),
                 dataset_split=self.dataset_split,
@@ -160,57 +128,34 @@ class ItemData(Dataset):
                 max_seq_length=patch_max_seq_length,
             )
             
-            # Check if already cached
             if self.patch_processor.is_processed and not force_process:
                 logger.info(f"Patch embeddings already cached for {self.dataset_split}")
             else:
                 logger.info(f"Processing patch embeddings for {self.dataset_split}...")
-                
-                # ===== FIX STARTS HERE =====
-                import pandas as pd
-                import gzip
-                import json
-                
-                # Correct path: raw/beauty/meta.json.gz
-                metadata_path = os.path.join(self.root, "raw", self.dataset_split, "meta.json.gz")
-                
-                if not os.path.exists(metadata_path):
-                    raise FileNotFoundError(
-                        f"Metadata file not found: {metadata_path}\n"
-                        f"Expected: {self.root}/raw/{self.dataset_split}/meta.json.gz"
-                    )
-                
-                # ✅ CORRECT: Read gzipped JSON line by line
-                logger.info(f"Loading metadata from {metadata_path}...")
-                meta_data = []
-                with gzip.open(metadata_path, 'rt', encoding='utf-8') as f:
-                    for line in f:
-                        if line.strip():  # Skip empty lines
-                            meta_data.append(json.loads(line))
-                
-                meta_df = pd.DataFrame(meta_data)
-                logger.info(f"✓ Loaded {len(meta_df)} items from metadata")
-                # ===== FIX ENDS HERE =====
-                
-                # Combine title and description
-                if 'title' in meta_df.columns and 'description' in meta_df.columns:
-                    item_titles = (
-                        meta_df['title'].fillna('') + ' ' + 
-                        meta_df['description'].fillna('')
-                    ).str.strip().tolist()
-                elif 'title' in meta_df.columns:
-                    item_titles = meta_df['title'].fillna('').tolist()
-                else:
-                    raise ValueError("Metadata must contain 'title' column")
-                
-                logger.info(f"✓ Extracted {len(item_titles)} item titles")
-                
-                # Process and cache embeddings
+                item_titles = self.item_text
+                logger.info(f"✓ Using {len(item_titles)} item texts from loaded data")
                 self.patch_processor.process(item_titles, force_reprocess=force_process)
-                logger.info(f"✅ Patch embeddings cached to {self.patch_processor.embeddings_path}")
+                logger.info(f"✅ Patch embeddings cached")
         else:
             self.patch_processor = None
 
+        # Image features (existing code)
+        if self.use_image_features:
+            with open(os.path.join(self.root, "raw", self.dataset_split, "datamaps.json"), "r") as f:
+                self.data_maps = json.load(f)
+
+            features_path = os.path.join(
+                self.root, "processed", f"{self.dataset_split}_{train_test_split}_item_img_feats.pt"
+            )
+            
+            if os.path.exists(features_path) and not force_process:
+                logger.info(f"Loading precomputed image features from {features_path}")
+                self.image_features = torch.load(features_path, map_location="cpu")
+                logger.info(f"Loaded image features {self.image_features.shape}")
+            else:
+                self.image_features = self._precompute_image_features()
+                os.makedirs(os.path.dirname(features_path), exist_ok=True)
+                torch.save(self.image_features, features_path)
 # =============================================================================
 # HOW TO APPLY THIS FIX:
 # =============================================================================
