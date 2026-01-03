@@ -419,3 +419,119 @@ class CrossAttentionDecoder(nn.Module):
         # output: [B, output_dim]
         
         return output
+
+
+class PatchReconstructionDecoder(nn.Module):
+    """
+    Decoder that reconstructs patch embeddings (preserves fine-grained structure).
+    
+    This is the MAIN decoder - reconstructs all 256 patches from 4 semantic tokens.
+    Unlike global decoder that compresses to [768], this preserves detail.
+    
+    Input:  [B, K, token_embed_dim]  e.g., [B, 4, 192]
+    Output: [B, N, patch_dim]        e.g., [B, 256, 1024]
+    """
+    
+    def __init__(
+        self,
+        num_tokens: int = 4,           # K semantic tokens
+        token_embed_dim: int = 192,
+        num_patches: int = 256,        # N patches to reconstruct
+        patch_dim: int = 1024,         # Output patch dimension
+        hidden_dim: int = 512,
+        num_heads: int = 8,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        
+        self.num_tokens = num_tokens
+        self.num_patches = num_patches
+        self.patch_dim = patch_dim
+        
+        # Project semantic tokens to hidden dimension
+        self.token_proj = nn.Linear(token_embed_dim, hidden_dim, bias=False)
+        self.token_norm = nn.LayerNorm(hidden_dim)
+        
+        # Learnable patch queries (one per output patch)
+        self.patch_queries = nn.Parameter(torch.randn(1, num_patches, hidden_dim))
+        nn.init.xavier_uniform_(self.patch_queries)
+        
+        # Cross-attention layers (queries = patches, keys/values = semantic tokens)
+        self.cross_attn_layers = nn.ModuleList([
+            nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            for _ in range(num_layers)
+        ])
+        
+        self.cross_attn_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim)
+            for _ in range(num_layers)
+        ])
+        
+        # Feed-forward layers
+        self.ffns = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim * 2, bias=False),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim * 2, hidden_dim, bias=False),
+            )
+            for _ in range(num_layers)
+        ])
+        
+        self.ffn_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim)
+            for _ in range(num_layers)
+        ])
+        
+        # Output projection
+        self.output_proj = nn.Linear(hidden_dim, patch_dim, bias=False)
+        
+    def forward(self, quantized_tokens: Tensor) -> Tensor:
+        """
+        Reconstruct patches from quantized semantic tokens.
+        
+        Args:
+            quantized_tokens: [B, K, token_embed_dim]
+            
+        Returns:
+            reconstructed_patches: [B, N, patch_dim]
+        """
+        B, K, D = quantized_tokens.shape
+        assert K == self.num_tokens
+        
+        # Project tokens to hidden dimension
+        tokens = self.token_proj(quantized_tokens)
+        tokens = self.token_norm(tokens)
+        # tokens: [B, K, hidden_dim]
+        
+        # Expand learnable patch queries
+        queries = self.patch_queries.expand(B, -1, -1)
+        # queries: [B, N, hidden_dim]
+        
+        # Multiple cross-attention layers
+        for i in range(len(self.cross_attn_layers)):
+            # Cross-attention: patch queries attend to semantic tokens
+            attn_output, _ = self.cross_attn_layers[i](
+                query=queries,
+                key=tokens,
+                value=tokens,
+                need_weights=False,
+            )
+            queries = self.cross_attn_norms[i](queries + attn_output)
+            
+            # Feed-forward
+            queries = self.ffn_norms[i](queries + self.ffns[i](queries))
+        
+        # queries: [B, N, hidden_dim]
+        
+        # Project to patch dimension
+        reconstructed_patches = self.output_proj(queries)
+        # reconstructed_patches: [B, N, patch_dim]
+        
+        return reconstructed_patches

@@ -1,0 +1,25 @@
+import gin
+import modules.quantize
+
+train.stage1_iterations = 50000
+train.stage2_iterations = 30000
+train.batch_size = 512
+train.learning_rate = 1e-3
+
+# Model architecture
+train.num_codebooks = 4
+train.codebook_size = 256
+train.patch_token_embed_dim = 192
+train.patch_hidden_dim = 512
+train.decoder_hidden_dim = 512
+
+# Loss weights
+train.patch_recon_weight = 1.0
+train.global_recon_weight = 0.2
+train.sequence_contrastive_weight = 0.5
+
+# Patch embeddings
+train.use_patch_embeddings = True
+train.patch_model_name = "sentence-transformers/sentence-t5-xl"
+train.num_patches = 256
+train.patch_dim = 1024

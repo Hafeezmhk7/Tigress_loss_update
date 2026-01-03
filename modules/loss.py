@@ -188,3 +188,109 @@ class CoSTInfoNCELoss(nn.Module):
     ) -> Tensor:
         loss = self.infonce(reconstructed, original)
         return loss
+
+
+class SequenceContrastiveLoss(nn.Module):
+    """
+    Sequence-Aware Contrastive Loss (Stage 2)
+    
+    Enforces that items appearing close in user sequences have similar semantic IDs.
+    
+    Uses InfoNCE with:
+    - Anchor: item i in sequence
+    - Positive: item i+1 (next item in same sequence)
+    - Negatives: random items from other sequences
+    """
+    
+    def __init__(
+        self,
+        temperature: float = 0.1,
+        num_negatives: int = 16,
+    ):
+        super().__init__()
+        self.temperature = temperature
+        self.num_negatives = num_negatives
+    
+    def forward(
+        self,
+        anchor: Tensor,      # [B, D] - Current item encoding
+        positive: Tensor,    # [B, D] - Next item in sequence
+        negatives: Tensor,   # [B, num_neg, D] - Random items
+    ) -> Tensor:
+        """
+        InfoNCE loss for sequence pairs.
+        
+        Args:
+            anchor: [B, D] - Embeddings of anchor items
+            positive: [B, D] - Embeddings of positive items (i+1)
+            negatives: [B, num_neg, D] - Embeddings of negative items
+            
+        Returns:
+            loss: scalar
+        """
+        # Normalize
+        anchor = F.normalize(anchor, dim=-1)
+        positive = F.normalize(positive, dim=-1)
+        negatives = F.normalize(negatives, dim=-1)
+        
+        # Positive similarity: [B]
+        pos_sim = (anchor * positive).sum(dim=-1) / self.temperature
+        
+        # Negative similarities: [B, num_neg]
+        neg_sim = torch.bmm(
+            anchor.unsqueeze(1),           # [B, 1, D]
+            negatives.transpose(1, 2)      # [B, D, num_neg]
+        ).squeeze(1) / self.temperature    # [B, num_neg]
+        
+        # Logits: [B, 1 + num_neg]
+        logits = torch.cat([pos_sim.unsqueeze(1), neg_sim], dim=1)
+        
+        # Labels: positive is always first (index 0)
+        labels = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+        
+        # Cross-entropy loss
+        loss = F.cross_entropy(logits, labels)
+        
+        return loss
+
+
+def extract_sequence_pairs(
+    sequences: List[List[int]],
+    num_negatives: int = 16,
+) -> List[Tuple[int, int, List[int]]]:
+    """
+    Extract (anchor, positive, negatives) triplets from user sequences.
+    
+    Args:
+        sequences: List of user sequences [[item1, item2, ...], ...]
+        num_negatives: Number of negative samples
+        
+    Returns:
+        triplets: List of (anchor_idx, positive_idx, [neg_idx1, neg_idx2, ...])
+    """
+    import random
+    
+    # Collect all items for negative sampling
+    all_items = []
+    for seq in sequences:
+        all_items.extend(seq)
+    all_items = list(set(all_items))
+    
+    triplets = []
+    for seq in sequences:
+        if len(seq) < 2:
+            continue
+        
+        for i in range(len(seq) - 1):
+            anchor = seq[i]
+            positive = seq[i + 1]
+            
+            # Sample negatives (avoid anchor and positive)
+            negatives = random.sample(
+                [item for item in all_items if item != anchor and item != positive],
+                min(num_negatives, len(all_items) - 2)
+            )
+            
+            triplets.append((anchor, positive, negatives))
+    
+    return triplets
