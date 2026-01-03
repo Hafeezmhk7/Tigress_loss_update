@@ -1,0 +1,88 @@
+# =============================================================================
+# STAGE 2 CONFIG: Sequence-Level Contrastive Learning
+# =============================================================================
+# Fine-tune PQ-VAE from Stage 1 with:
+# - Continue patch + global reconstruction (same weights as Stage 1)
+# - ADD sequence contrastive loss (weight=0.5)
+# - Enforce behavioral patterns (items in sequences share latent space)
+# =============================================================================
+
+import data.processed
+
+# ========================================
+# DATASET & PATHS
+# ========================================
+train.dataset=%data.processed.RecDataset.AMAZON
+train.dataset_folder="dataset/amazon/2014"
+train.dataset_split="beauty"
+
+# ========================================
+# STAGE 1 CHECKPOINT (REQUIRED!)
+# ========================================
+# ⚠️ IMPORTANT: Update this with your Stage 1 checkpoint!
+train.stage1_checkpoint_path="/home/scur0555/logdir/pqvae/stage1/beauty/1234567890/checkpoint_50000.pt"
+
+# ========================================
+# TRAINING PARAMETERS
+# ========================================
+train.iterations=30000
+train.batch_size=512
+train.learning_rate=5e-4  # Lower LR for fine-tuning
+train.weight_decay=0.01
+
+# Logging
+train.save_model_every=10000
+train.eval_every=5000
+train.log_every=1000
+train.log_dir="logdir/pqvae/stage2"
+train.wandb_logging=True
+train.run_prefix="Stage2-SeqContrastive"
+
+# ========================================
+# MODEL ARCHITECTURE (MUST MATCH STAGE 1!)
+# ========================================
+# Patch embeddings
+train.use_patch_embeddings=True
+train.patch_model_name="sentence-transformers/sentence-t5-xl"
+train.patch_max_seq_length=77
+
+# Encoder
+train.num_codebooks=4
+train.codebook_size=256
+train.patch_token_embed_dim=192
+
+# ========================================
+# LOSS WEIGHTS
+# ========================================
+# Continue Stage 1 losses (same weights)
+train.patch_recon_weight=1.0
+train.global_recon_weight=0.2
+train.commitment_weight=0.25
+train.use_diversity_loss=True
+train.diversity_weight=0.01
+
+# NEW: Sequence contrastive loss
+train.sequence_contrastive_weight=0.5
+
+# ========================================
+# SEQUENCE CONTRASTIVE PARAMETERS
+# ========================================
+train.sequence_sample_size=10
+train.num_negatives=16
+train.contrastive_temperature=0.1
+
+# ========================================
+# ADVANCED
+# ========================================
+train.gumbel_temperature=0.2
+train.mixed_precision_type="fp16"
+
+# ========================================
+# NOTES
+# ========================================
+# Stage 2 fine-tunes Stage 1 model with sequence-level supervision.
+# The sequence contrastive loss ensures items appearing together in user
+# sequences have similar semantic IDs, enforcing behavioral patterns.
+#
+# Key insight: Items co-occurring in sequences should be close in latent space,
+# which helps the downstream autoregressive decoder learn sequential patterns.

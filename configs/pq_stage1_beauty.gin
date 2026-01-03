@@ -1,0 +1,77 @@
+# =============================================================================
+# STAGE 1 CONFIG: Item-Level Patch Reconstruction
+# =============================================================================
+# Train PQ-VAE with:
+# - Patch reconstruction (MAIN task, weight=1.0)
+# - Global reconstruction (AUXILIARY task, weight=0.2)  
+# - Codebook quantization loss
+# - Diversity loss
+# =============================================================================
+
+import data.processed
+
+# ========================================
+# DATASET & PATHS
+# ========================================
+train.dataset=%data.processed.RecDataset.AMAZON
+train.dataset_folder="dataset/amazon/2014"
+train.dataset_split="beauty"
+train.force_dataset_process=False
+
+# ========================================
+# TRAINING PARAMETERS
+# ========================================
+train.iterations=50000
+train.batch_size=512
+train.learning_rate=1e-3
+train.weight_decay=0.01
+
+# Logging
+train.save_model_every=10000
+train.eval_every=5000
+train.log_every=1000
+train.log_dir="logdir/pqvae/stage1"
+train.wandb_logging=True
+train.run_prefix="Stage1-PatchRecon"
+
+# ========================================
+# MODEL ARCHITECTURE
+# ========================================
+# Patch embeddings
+train.use_patch_embeddings=True
+train.patch_model_name="sentence-transformers/sentence-t5-xl"
+train.patch_max_seq_length=77
+
+# Encoder
+train.num_codebooks=4
+train.codebook_size=256
+train.patch_token_embed_dim=192
+
+# ========================================
+# LOSS WEIGHTS (CRITICAL!)
+# ========================================
+# Main task: Patch reconstruction
+train.patch_recon_weight=1.0
+
+# Auxiliary task: Global reconstruction (LOW WEIGHT)
+train.global_recon_weight=0.2
+
+# Codebook commitment
+train.commitment_weight=0.25
+
+# Diversity (encourage different semantic tokens)
+train.use_diversity_loss=True
+train.diversity_weight=0.01
+
+# ========================================
+# ADVANCED
+# ========================================
+train.gumbel_temperature=0.2
+train.mixed_precision_type="fp16"
+
+# ========================================
+# NOTES
+# ========================================
+# Stage 1 focuses on learning good semantic representations at item-level.
+# The low global_recon_weight ensures we preserve overall semantics
+# while patch reconstruction captures fine-grained details.

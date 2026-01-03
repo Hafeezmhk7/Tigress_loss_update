@@ -1,165 +1,282 @@
-# 🐅 TIGRESS: Transformer Index for Generative Recommenders with Enhanced Semantic Signals
+# Quick Start: Two-Stage PQ-VAE Training
 
+## ⚡ Fast Track (Copy-Paste Commands)
 
-## Setup and Installation
-
-### 1. Create Environment
-
+### Prerequisites Check
 ```bash
-conda create -n rq-vae python=3.9
-pip install -r requirements.txt
-conda activate rq-vae
+# 1. Check patch embeddings exist
+ls dataset/amazon/2014/processed/beauty_text_patches.npy
+ls dataset/amazon/2014/processed/beauty_text_masks.npy
+
+# If missing, run patch processor:
+python -m data.patch_processor dataset/amazon/2014 beauty
 ```
 
-or using SLURM job
+### Stage 1: Item-Level Training
 
 ```bash
-sbatch run job_scripts/install_enviroment.job
+# Submit job
+sbatch job_scripts/train_pqvae_stage1.job
+
+# Monitor progress
+tail -f slurm_output/train/pqvae/stage1_beauty_*.out
+
+# Or run interactively (for debugging)
+python train_pqvae_stage1.py configs/pq_stage1_beauty.gin
 ```
 
-### 2. Weights & Biases (Optional)
-Get your key from: [link](https://wandb.ai/authorize)
+**Expected Output**:
+- Training will run for 50,000 iterations (~6-8 hours on H100)
+- Checkpoints saved every 10,000 iterations
+- Final checkpoint: `~/logdir/pqvae/stage1/beauty/{timestamp}/checkpoint_50000.pt`
+
+### Stage 2: Sequence-Level Training
+
 ```bash
-wandb login <API Key>
+# 1. Copy checkpoint path from Stage 1
+STAGE1_CKPT="$(ls -td ~/logdir/pqvae/stage1/beauty/*/checkpoint_50000.pt | head -1)"
+echo "Stage 1 checkpoint: $STAGE1_CKPT"
+
+# 2. Update config (automated)
+sed -i "s|train.stage1_checkpoint_path=.*|train.stage1_checkpoint_path=\"$STAGE1_CKPT\"|" configs/pq_stage2_beauty.gin
+
+# 3. Submit job
+sbatch job_scripts/train_pqvae_stage2.job
+
+# Monitor
+tail -f slurm_output/train/pqvae/stage2_beauty_*.out
 ```
 
-### 3. Dataset Downloading & Processing
+**Expected Output**:
+- Training will run for 30,000 iterations (~4-6 hours)
+- Final checkpoint: `~/logdir/pqvae/stage2/beauty/{timestamp}/checkpoint_30000.pt`
+- Use this for decoder training!
 
-```bash
-# change directory
-cd data
+---
 
-# amazon 2014 (auto-downloads (P5 processed data), process splits (train:dev:test), and save)
-python amazon.py --root ../dataset/amazon/2014 --split beauty
+## 📋 Checklist
 
-# amazon 2023 (auto-downloads (raw data), pre-process (P5), and save)
-python p5.py \
-    --dataset_dir "../dataset/amazon/2023/raw" \
-    --dataset_split "beauty" \
-    --data_type "Amazon"
+### Before Starting
 
-# process splits (train:dev:test) and save
-python amazon.py --root ../dataset/amazon/2023 --split beauty
+- [ ] Patch embeddings preprocessed (`beauty_text_patches.npy` exists)
+- [ ] Dataset processed (`data_beauty.pt` exists)  
+- [ ] CUDA available (`nvidia-smi` works)
+- [ ] WandB API key set (in job scripts)
+- [ ] Conda environment activated (`rq-vae`)
 
-# download product images (2014 and 2023)
-python download_product_images.py \
-    --dataset_dir "../dataset/amazon/2023/raw" \
-    --dataset_split "beauty"
-```
+### Stage 1 Complete
 
-### 4. Run Training and Testing
+- [ ] Checkpoint saved: `checkpoint_50000.pt`
+- [ ] WandB shows decreasing `train/patch_recon` loss
+- [ ] WandB shows `train/p_unique_ids` > 0.8 (good codebook usage)
+- [ ] Config updated for Stage 2 with checkpoint path
 
-Configs `(configs/*.gin)` can be modified to adapt to different datasets, categories, and other parameters.
+### Stage 2 Complete
 
-For example,
+- [ ] Checkpoint saved: `checkpoint_30000.pt`
+- [ ] WandB shows decreasing `train/seq_contrastive` loss
+- [ ] Ready for decoder training
+
+---
+
+## 🔍 Validation
+
+### Test Stage 1 Model
+
 ```python
-train.dataset_folder="dataset/amazon/2014"
-train.dataset_split="beauty"
-train.log_dir="logdir/rqvae/amazon/2014"
-train.wandb_logging=False
-train.use_image_features=False # for CLIP-based semantic ids
-train.feature_combination_mode="" # "sum", "concat" or "cross-attn" if use_image_features
-train.run_prefix="" # for wandb
-train.pretrained_decoder_path=None
-train.pretrained_rqvae_path=None
-train.enable_image_cross_attn=False # use cross attention (text and image)
+import torch
+from modules.pqvae_updated import PqVae
+
+# Load checkpoint
+ckpt = torch.load("path/to/checkpoint_50000.pt")
+
+# Initialize model
+model = PqVae(
+    num_codebooks=4,
+    codebook_size=256,
+    patch_token_embed_dim=192,
+)
+
+# Load weights
+model.load_state_dict(ckpt['model'])
+model.eval()
+
+# Test semantic ID extraction
+from data.processed import ItemData
+dataset = ItemData("dataset/amazon/2014", split="beauty", use_patch_embeddings=True)
+
+batch = dataset[0]
+output = model.get_semantic_ids(batch)
+print("Semantic IDs shape:", output.sem_ids.shape)  # Should be [1, 4]
+print("Semantic IDs:", output.sem_ids)  # Should be 4 integers (0-255 each)
 ```
 
-To start the training,
+### Test Stage 2 Model
+
+```python
+from modules.pqvae_twostage import PqVaeTwoStage
+
+# Load Stage 2 checkpoint
+model = PqVaeTwoStage(...)
+model.load_pretrained("path/to/stage2/checkpoint_30000.pt")
+
+# Check both stages work
+model.set_stage(1)  # Item-level
+model.set_stage(2)  # Sequence-level
+print("✓ Both stages functional")
+```
+
+---
+
+## 🐛 Common Errors & Fixes
+
+### Error: "text_patches required"
+
+**Fix**:
 ```bash
-# training RQ-VAE
-python train_rqvae.py --config configs/rqvae_amazon.gin
-
-# training Encoder-Decoder-Model
-python train_decoder.py --config configs/decoder_amazon.gin
+python -m data.patch_processor dataset/amazon/2014 beauty --force
 ```
-or using SLURM job
+
+### Error: "Stage 1 checkpoint not found"
+
+**Fix**:
+```bash
+# Find checkpoint
+find ~/logdir/pqvae/stage1 -name "checkpoint_*.pt"
+
+# Update config with full path
+vim configs/pq_stage2_beauty.gin
+```
+
+### Error: CUDA OOM
+
+**Fix** (reduce memory):
+```bash
+# In config:
+train.batch_size=256  # Was 512
+train.patch_max_seq_length=64  # Was 77
+```
+
+### Error: "No sequences sampled"
+
+**Fix** (increase sampling):
+```bash
+# In Stage 2 config:
+train.sequence_sample_size=50  # Was 10
+```
+
+---
+
+## 📊 Expected Training Times
+
+| Stage | Iterations | H100 Time | A100 Time | V100 Time |
+|-------|-----------|-----------|-----------|-----------|
+| 1     | 50,000    | 6-8 hrs   | 10-12 hrs | 18-24 hrs |
+| 2     | 30,000    | 4-6 hrs   | 6-8 hrs   | 12-16 hrs |
+| **Total** | **80,000** | **10-14 hrs** | **16-20 hrs** | **30-40 hrs** |
+
+*Assumes batch_size=512, default settings*
+
+---
+
+## 🎯 Key Hyperparameters
+
+### Stage 1 (Item-Level)
+
+```python
+patch_recon_weight = 1.0      # MAIN: Don't change!
+global_recon_weight = 0.2     # AUXILIARY: Keep low (0.1-0.3)
+commitment_weight = 0.25      # Standard VQ-VAE
+diversity_weight = 0.01       # Encourage variety
+```
+
+**Tuning Tips**:
+- If patch reconstruction not improving → increase `patch_recon_weight` (try 1.5)
+- If codes collapse (low unique usage) → increase `diversity_weight` (try 0.02)
+
+### Stage 2 (Sequence-Level)
+
+```python
+sequence_contrastive_weight = 0.5  # Balance with reconstruction
+contrastive_temperature = 0.1      # Sharpness of similarity
+num_negatives = 16                 # Negative samples per anchor
+```
+
+**Tuning Tips**:
+- If seq contrastive dominates → reduce weight (try 0.3)
+- If not learning behavioral patterns → increase weight (try 0.7)
+- If training unstable → increase temperature (try 0.2)
+
+---
+
+## 📈 Monitoring Metrics
+
+### WandB Dashboard
+
+Stage 1 - Look for:
+- ✅ `train/patch_recon`: Steadily decreasing (target: <0.1)
+- ✅ `train/global_recon`: Lower than patch (target: <0.05)
+- ✅ `train/p_unique_ids`: High usage (target: >0.8)
+
+Stage 2 - Additionally:
+- ✅ `train/seq_contrastive`: Decreasing (target: <0.5)
+- ✅ Reconstruction losses stay stable (not degrading)
+
+**Red Flags** 🚩:
+- Patch recon increasing → learning rate too high
+- Unique IDs dropping → codebook collapse, increase diversity
+- Seq contrastive stuck → not enough sequence samples
+
+---
+
+## 🚀 Next Steps
+
+After Stage 2 completes:
 
 ```bash
-sbatch run job_scripts/train_rqvae.job
-sbatch run job_scripts/train_decoder.job
-sbatch run job_scripts/test_decoder.job
+# 1. Update decoder config with Stage 2 checkpoint
+vim configs/decoder_patches_gin
+
+# Set:
+train.pretrained_rqvae_path="~/logdir/pqvae/stage2/beauty/{timestamp}/checkpoint_30000.pt"
+
+# 2. Train decoder
+sbatch job_scripts/train_decoder.job
+
+# 3. Evaluate
+python test_decoder.py
 ```
 
+---
 
-## Weights & Biases Results Dashboard
-- RQ-VAE Training Report: `[redacted]`
-- Decoder Training and Testing Report: `[redacted]`
-- Decoder Testing Only Report: `[redacted]`
+## 💡 Pro Tips
 
-## High-Level Directory Structure
+1. **Use tmux for long jobs**:
+   ```bash
+   tmux new -s pqvae
+   python train_pqvae_stage1.py configs/pq_stage1_beauty.gin
+   # Detach: Ctrl+B, D
+   # Reattach: tmux attach -t pqvae
+   ```
 
-```bash
-├── assets/                # Visuals used in paper/README (eg., plots, diagrams)
-├── configs/               # Configuration files for RQ-VAE and decoder training
-├── data/                  # Data loaders, preprocessing scripts, schema
-├── evaluate/              # Evaluation metrics and logic
-├── init/                  # Initialization strategies (e.g., KMeans)
-├── job_scripts/           # SLURM job scripts for training and evaluation
-├── metrics/               # Stored evaluation results (e.g., Recall, Fairness)
-├── modules/               # Core model components (encoder, quantizer, transformer, etc.)
-├── notebooks/             # Jupyter notebooks for analysis and preprocessing
-├── ops/                   # Triton for jagged transformer integration
-├── train_rqvae.py         # Script to train the RQ-VAE model
-├── train_decoder.py       # Script to train the Transformer decoder
-├── test_decoder.py        # Script to evaluate the decoder
-├── requirements.txt       # Python dependencies
-├── README.md              # Project overview and usage
-├── REPRO.md               # Reproducibility checklist
-└── RQ-VAE-README.md       # Notes specific to RQ-VAE implementation
-```
+2. **Compare loss components**:
+   ```python
+   # In WandB, create custom chart:
+   # X-axis: iteration
+   # Y-axis: train/patch_recon, train/global_recon (separate lines)
+   # Should see patch_recon >> global_recon
+   ```
 
+3. **Checkpoint every 5k during development**:
+   ```python
+   train.save_model_every=5000  # More frequent saves
+   ```
 
+4. **Quick test before full run**:
+   ```python
+   train.iterations=1000  # Test for 1k iterations (~10 min)
+   ```
 
-## Datasets
+---
 
-
-- [Amazon 2014 [2]](https://jmcauley.ucsd.edu/data/amazon/index_2014.html)
-  - Pre-processing: We used [P5 Pre-procesing](https://github.com/jeykigung/P5/blob/main/preprocess/data_preprocess_amazon.ipynb) pipeline to pre-process the data and keep users interactions having equal to and more than 5 reviews.
-  - Categories considered: Beauty, Sports and Outdoors, Toys and Games
-  - Attributes for user fairness: User Interaction History (Title, Brand, Categories, Price)
-  - Attributes for item fairness: Title, Brand, Categories, Price
-  - Other attributes: Product Images
-
-- [Amazon 2023 [3]](https://amazon-reviews-2023.github.io/)
-  - Pre-processing: Similar to the 2014 edition, we used [P5 Pre-procesing](https://github.com/jeykigung/P5/blob/main/preprocess/data_preprocess_amazon.ipynb) pipeline to pre-process the data and keep users interactions having equal to and more than 5 reviews.
-  - Categories considered: All Beauty, Sports and Outdoors, Toys and Games, Video Games, Software
-  - Attributes for user fairness: User Interaction History (Title, Brand, Categories, Rating, Price)
-  - Attributes for item fairness: Title, Brand, Categories, Rating, Price
-  - Other attributes: Product Images
-
-![Amazon Dataset (2014 & 2023)](assets/datasets.png)
-*User interaction statistics for the Amazon 2014 [2] and Amazon 2023 [3] datasets.*
-
-
-## Baselines
-
-We compare against three sequential recommendation models for reproducibility and benchmarking. For TIGRESS, we focus on comparison with TIGER. All models are implemented using **PyTorch**, and we follow original implementations when available to ensure reproducibility.
-
-- **[SASRec [4]](https://github.com/pmixer/SASRec.pytorch)**: A transformer-based sequential recommender that uses self-attention to model user-item interaction sequences. Serves as a strong baseline for modeling user preferences via item embeddings.
-
-- **[S³-Rec [5]](https://github.com/RUCAIBox/CIKM2020-S3Rec)**: Builds upon SASRec by introducing self-supervised learning objectives using mutual information maximization, enhancing robustness and performance in sparse data settings.
-
-- **[TIGER [1]](https://github.com/EdoardoBotta/RQ-VAE-Recommender):** A generative retrieval framework that learns to generate relevant item identifiers directly from user context, integrating a language modeling paradigm into recommendation tasks. Used as the main baseline to evaluate our proposed TIGRESS model.
-
-
-- **[GRU4Rec [8]](https://github.com/hidasib/GRU4Rec):**
-A recurrent neural network-based sequential recommender that models user interaction sequences using Gated Recurrent Units (GRUs). It captures short-term session dynamics and predicts the next likely item by updating hidden states across interactions.
-
-## References
-
-[1] Rajput, S., Mehta, N., Singh, A., Keshavan, R.H., Vu, T., Heldt, L., Hong, L., Tay, Y., Tran, V.Q., Samost, J., Kula, M., Chi, E.H., Sathiamoorthy, M.: Recommender systems with generative retrieval (2023), https://arxiv.org/abs/2305.05065
-
-[2] McAuley, J., Targett, C., Shi, Q., van den Hengel, A.: Image-based recommendations on styles and substitutes (2015), https://arxiv.org/abs/1506.04757  
-
-[3] Hou, Y., Li, J., He, Z., Yan, A., Chen, X., McAuley, J.: Bridging language and items for retrieval and recommendation. arXiv preprint arXiv:2403.03952 (2024)  
-
-[4] Kang, W.C., McAuley, J.: Self-attentive sequential recommendation. In: 2018 IEEE International Conference on Data Mining (ICDM). pp. 197–206. IEEE (2018), https://arxiv.org/abs/1808.09781  
-
-[5] Kang, W.C., McAuley, J.: Self-attentive sequential recommendation. In: 2018 IEEE International Conference on Data Mining (ICDM). pp. 197–206. IEEE (2018), https://arxiv.org/abs/1808.09781  
-
-[6] Liu, H., Wei, Y., Song, X., Guan, W., Li, Y.F., Nie, L.: Mmgrec: Multimodal generative recommendation with transformer model (2024), https://arxiv.org/abs/ 2404.16555  
-
-[7] Zhai, J., Mai, Z.F., Wang, C.D., Yang, F., Zheng, X., Li, H., Tian, Y.: Multimodal quantitative language for generative recommendation (2025), https://arxiv.org/ abs/2504.05314
-
-[8] Hidasi, B., Karatzoglou, A., Baltrunas, L., Tikk, D.: Session-based recom- mendations with recurrent neural networks (2016), URL https://arxiv.org/ abs/1511.06939
+Happy training! 🎉
