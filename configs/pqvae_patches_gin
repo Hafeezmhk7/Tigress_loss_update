@@ -1,0 +1,198 @@
+# =============================================================================
+# HIERARCHICAL PQ-VAE FOR SEMANTIC ID GENERATION
+# =============================================================================
+# Based on: VQ-VAE-2 (hierarchical) + TIGER (semantic IDs) + PQ (independent)
+#
+# Architecture:
+# 1. Hierarchical Encoder: Sequential conditioning for hierarchy
+# 2. Product Quantization: Independent codebooks
+# 3. Cross-Attention Decoder: Preserves structure, reconstructs global
+#
+# Output: Hierarchical Semantic IDs [code_0, code_1, code_2, code_3]
+#   code_0: Category (most abstract)
+#   code_1: Subcategory
+#   code_2: Attributes
+#   code_3: Details (most specific)
+# =============================================================================
+
+import gin
+import data.processed
+import modules.quantize
+from data.processed import RecDataset
+
+# ========================================
+# DATASET & PATHS
+# ========================================
+train.dataset_folder="dataset/amazon/2014"
+train.dataset=%data.processed.RecDataset.AMAZON
+train.dataset_split="beauty"
+train.force_dataset_process=False
+
+# ========================================
+# TRAINING PARAMETERS
+# ========================================
+train.iterations=50000
+train.batch_size=512
+train.learning_rate=1e-3
+train.weight_decay=0.0
+train.gradient_accumulate_every=1
+train.save_model_every=5000
+train.eval_every=5000
+train.log_every=100
+
+# Logging
+train.log_dir="logdir/pqvae/hierarchical"
+train.wandb_logging=True
+train.run_prefix="Hierarchical-PQ-VAE"
+train.debug=False
+
+# ========================================
+# PATCH EMBEDDINGS (ENABLED)
+# ========================================
+train.use_patch_embeddings=True
+train.patch_model_name="sentence-transformers/sentence-t5-xl"
+train.patch_max_seq_length=77
+
+# ========================================
+# IMAGE FEATURES (OPTIONAL)
+# ========================================
+train.use_image_features=False
+train.feature_combination_mode="sum"
+
+# ========================================
+# HIERARCHICAL PQ-VAE MODEL
+# ========================================
+train.use_patch_encoder=True
+
+# Reconstruction target
+train.vae_input_dim=768                 # Original embedding dimension
+train.vae_n_cat_feats=0
+
+# Encoder: Hierarchical with sequential conditioning
+train.patch_token_dim=1024              # Input: sentence-t5-xl patches
+train.patch_token_embed_dim=192         # Dimension per semantic token (4×192=768)
+train.patch_hidden_dim=512              # Processing dimension
+train.patch_num_heads=8                 # Multi-head attention
+train.patch_num_layers=2                # Self-attention layers
+train.patch_dropout=0.1
+
+# Product Quantization (4 independent codebooks)
+train.num_codebooks=4
+train.vae_codebook_size=256
+train.vae_embed_dim=192                 # Must match patch_token_embed_dim
+train.commitment_weight=1.0
+train.use_kmeans_init=True
+train.vae_codebook_normalize=False
+train.vae_sim_vq=False
+train.vae_codebook_mode=%modules.quantize.QuantizeForwardMode.ROTATION_TRICK
+
+# Diversity loss (encourages different attention patterns)
+train.patch_diversity_weight=0.01
+
+# Decoder: Cross-attention (preserves structure!)
+train.decoder_hidden_dim=512
+train.decoder_num_layers=2
+train.decoder_num_heads=8
+train.decoder_dropout=0.1
+
+# Hybrid mode (text + image)
+train.patch_hybrid_mode=False
+train.patch_num_text_codebooks=3
+train.patch_num_image_codebooks=1
+
+# Legacy parameters (for compatibility)
+train.vae_hidden_dims=[512, 256, 128]
+
+# Pretrained model
+train.pretrained_pqvae_path=None
+
+# ========================================
+# ARCHITECTURE FLOW
+# ========================================
+# Input: Text → sentence-t5-xl
+#     [B, 77, 1024] patches
+#     ↓
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# HIERARCHICAL ENCODER
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Input Projection: 1024 → 512
+#     [B, 77, 512]
+#     ↓
+# Self-Attention (2 layers)
+#     Tokens interact, build context
+#     [B, 77, 512]
+#     ↓
+# Hierarchical Cross-Attention:
+#   Level 0: Extract category (most abstract)
+#     Query attends to all tokens
+#   Level 1: Extract subcategory
+#     Query conditioned on token_0
+#   Level 2: Extract attributes
+#     Query conditioned on tokens_0,1
+#   Level 3: Extract details
+#     Query conditioned on tokens_0,1,2
+#     [B, 4, 512]
+#     ↓
+# Project: 512 → 192
+#     [B, 4, 192] semantic tokens
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PRODUCT QUANTIZATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Independent quantization:
+#   Codebook 0 quantizes token_0 → code_0 (category)
+#   Codebook 1 quantizes token_1 → code_1 (subcategory)
+#   Codebook 2 quantizes token_2 → code_2 (attributes)
+#   Codebook 3 quantizes token_3 → code_3 (details)
+#     [B, 4, 192] quantized
+#     [B, 4] codes (Semantic IDs!)
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CROSS-ATTENTION DECODER
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Global query attends to 4 quantized tokens
+#     Cross-Attention (2 layers)
+#     [B, 1, 512]
+#     ↓
+# Project: 512 → 768
+#     [B, 768] reconstructed global embedding
+#
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LOSS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# L_recon = ||x_global - x̂_global||²
+# L_vq = Σᵢ ||sg[zᵢ] - z_q,i||² + β||zᵢ - sg[z_q,i]||²
+# L_div = DiversityLoss(attention_patterns)
+# L_total = L_recon + L_vq + λ·L_div
+# =============================================================================
+
+# =============================================================================
+# SEMANTIC ID STRUCTURE
+# =============================================================================
+# Each item gets a 4-dimensional hierarchical semantic ID:
+#   [code_0, code_1, code_2, code_3]
+#
+# Example for "Sony WH-1000XM4 Wireless Noise-Canceling Headphones":
+#   code_0 = 42  → Electronics category (most abstract)
+#   code_1 = 137 → Audio/Headphones subcategory
+#   code_2 = 89  → Premium quality + Wireless attributes
+#   code_3 = 203 → Sony brand + Noise-canceling details (most specific)
+#
+# Hierarchical Structure:
+#   - Token 0 captures broad category (e.g., "Electronics")
+#   - Token 1 refines to subcategory (e.g., "Headphones") given token 0
+#   - Token 2 adds attributes (e.g., "Wireless, Premium") given tokens 0,1
+#   - Token 3 adds specific details (e.g., "Sony, Noise-canceling") given all
+#
+# For Autoregressive Generation (like TIGER):
+#   1. Predict code_0 (category level)
+#   2. Predict code_1 | code_0 (subcategory given category)
+#   3. Predict code_2 | code_0, code_1 (attributes given cat+subcat)
+#   4. Predict code_3 | code_0, code_1, code_2 (details given all)
+#
+# This hierarchical structure enables:
+#   ✓ Sequential prediction for recommendation
+#   ✓ Semantic clustering at different abstraction levels
+#   ✓ Efficient retrieval with product quantization
+#   ✓ Interpretable item representations
+# =============================================================================

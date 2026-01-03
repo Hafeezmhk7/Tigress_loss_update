@@ -1,0 +1,139 @@
+# =============================================================================
+# DECODER CONFIG FOR HIERARCHICAL PQ-VAE (SIMPLIFIED)
+# =============================================================================
+# This config works with the existing train_decoder.py without modifications
+# =============================================================================
+
+import data.processed
+import modules.model
+
+# ========================================
+# DATASET & PATHS
+# ========================================
+train.dataset=%data.processed.RecDataset.AMAZON
+train.dataset_folder="dataset/amazon/2014"
+train.dataset_split="beauty"
+train.force_dataset_process=False
+
+# ========================================
+# PRETRAINED PQ-VAE PATH
+# ========================================
+# ⚠️ IMPORTANT: Update this with your trained PQ-VAE checkpoint!
+train.pretrained_rqvae_path= "/home/scur0555/logdir/pqvae/hierarchical/beauty/1767356434/checkpoint_50000.pt"  # ← SET THIS!
+train.pretrained_decoder_path=None
+
+# ========================================
+# TRAINING PARAMETERS
+# ========================================
+train.iterations=200000
+train.batch_size=256
+train.learning_rate=0.0003
+train.weight_decay=0.035
+train.gradient_accumulate_every=1
+
+# Logging
+train.save_model_every=40000
+train.eval_every=5000
+train.log_every=1000
+train.log_dir="logdir/decoder/hierarchical"
+train.wandb_logging=True
+train.run_prefix="Hierarchical-Decoder"
+train.debug=False
+
+# ========================================
+# PQ-VAE ARCHITECTURE (MUST MATCH!)
+# ========================================
+train.vae_input_dim=768                 # Reconstruction target
+train.vae_n_layers=4                    # ← Number of codebooks
+train.vae_embed_dim=192                 # ← Must match patch_token_embed_dim
+train.vae_codebook_size=256             # Codebook size
+train.vae_hidden_dims=[512, 256, 128]   # Legacy
+train.vae_n_cat_feats=0
+train.vae_codebook_normalize=False
+train.vae_sim_vq=False
+
+# ========================================
+# DECODER ARCHITECTURE
+# ========================================
+train.decoder_embed_dim=128
+train.attn_embed_dim=512
+train.attn_heads=8
+train.attn_layers=8
+train.dropout_p=0.3
+train.model_jagged_mode=True
+train.rope=False
+train.prefix_matching=False
+
+# Patch embeddings (required for PQ-VAE)
+train.use_patch_embeddings=True
+train.patch_model_name="sentence-transformers/sentence-t5-xl"
+train.patch_max_seq_length=77
+
+# ========================================
+# IMAGE FEATURES (NOT USED)
+# ========================================
+train.use_image_features=False
+train.feature_combination_mode="sum"
+train.enable_image_cross_attn=False
+
+# ========================================
+# RQ-VAE SETTINGS
+# ========================================
+train.use_rqvae_cross_attn=False
+
+# ========================================
+# DATA LOADING
+# ========================================
+train.train_data_subsample=True
+train.category=None
+
+# ========================================
+# TESTING CONFIG
+# ========================================
+test.batch_size=512
+test.vae_input_dim=768
+test.vae_n_layers=4
+test.vae_embed_dim=192
+test.vae_codebook_size=256
+test.vae_hidden_dims=[512, 256, 128]
+test.vae_n_cat_feats=0
+test.vae_codebook_normalize=False
+test.vae_sim_vq=False
+
+test.dataset=%data.processed.RecDataset.AMAZON
+test.dataset_folder="dataset/amazon/2014"
+test.dataset_split="beauty"
+test.force_dataset_process=False
+
+test.decoder_embed_dim=128
+test.attn_embed_dim=512
+test.attn_heads=8
+test.attn_layers=8
+test.dropout_p=0.3
+test.model_jagged_mode=True
+test.rope=False
+test.prefix_matching=False
+
+test.use_image_features=False
+test.feature_combination_mode="sum"
+test.enable_image_cross_attn=False
+test.use_rqvae_cross_attn=False
+
+test.category=None
+test.debug=False
+test.wandb_logging=False
+test.run_prefix="Hierarchical-Decoder-Test"
+
+test.pretrained_rqvae_path=None
+test.pretrained_decoder_path=None
+
+# =============================================================================
+# NOTE: Patch Embeddings
+# =============================================================================
+# The tokenizer will load patch embeddings automatically through the PQ-VAE
+# checkpoint. Make sure:
+# 1. Your PQ-VAE was trained with use_patch_encoder=True
+# 2. Patch embeddings exist for 'all' split (12101 items)
+# 3. The patch embeddings are at:
+#    dataset/amazon/2014/processed/beauty_text_patches.npy
+# =============================================================================

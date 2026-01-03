@@ -11,6 +11,7 @@ from evaluate.metrics import TopKAccumulator
 from modules.model import EncoderDecoderRetrievalModel
 from modules.scheduler.inv_sqrt import InverseSquareRootScheduler
 from modules.tokenizer.semids import SemanticIdTokenizer
+from modules.tokenizer.pqvae_tokenizer import PqVaeTokenizer
 from modules.utils import (compute_debug_metrics, parse_config, 
                            display_args, display_metrics, 
                            display_model_summary, set_seed, 
@@ -228,7 +229,10 @@ def train(
     debug=False,
     enable_image_cross_attn=False,
     use_rqvae_cross_attn=False,
-):
+    use_patch_embeddings=True,                              # ← ADD
+    patch_model_name="sentence-transformers/sentence-t5-xl", # ← ADD
+    patch_max_seq_length=77,                                 # ← ADD
+    ):
 
     # create logdir if not exists
     uid = str(int(time.time()))
@@ -278,6 +282,10 @@ def train(
             split=dataset_split,
             use_image_features=use_image_features,
             feature_combination_mode=feature_combination_mode,
+            use_patch_embeddings=use_patch_embeddings,       # ← ADD
+            patch_model_name=patch_model_name,               # ← ADD
+            patch_max_seq_length=patch_max_seq_length,       # ← ADD
+
             device=device,
         )
         if category is None
@@ -289,6 +297,9 @@ def train(
             category=category,
             use_image_features=use_image_features,
             feature_combination_mode=feature_combination_mode,
+            use_patch_embeddings=use_patch_embeddings,       # ← ADD
+            patch_model_name=patch_model_name,               # ← ADD
+            patch_max_seq_length=patch_max_seq_length,       # ← ADD
             device=device,
         )
     )
@@ -301,10 +312,13 @@ def train(
         split=dataset_split,
         use_image_features=use_image_features,
         feature_combination_mode=feature_combination_mode,
+        # use_patch_embeddings=use_patch_embeddings,       # ← ADD
+        # patch_model_name=patch_model_name,               # ← ADD
+        # patch_max_seq_length=patch_max_seq_length,       # ← ADD
         device=device,
     )
     train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True)
+        train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_seqbatch)
     describe_dataloader(train_dataloader, title="Train DataLoader Summary")
     train_dataloader = cycle(train_dataloader)
 
@@ -317,10 +331,13 @@ def train(
         split=dataset_split,
         use_image_features=use_image_features,
         feature_combination_mode=feature_combination_mode,
+        # use_patch_embeddings=use_patch_embeddings,       # ← ADD
+        # patch_model_name=patch_model_name,               # ← ADD
+        # patch_max_seq_length=patch_max_seq_length,       # ← ADD
         device=device,
     )
     eval_dataloader = DataLoader(
-        eval_dataset, batch_size=batch_size*2, shuffle=True)
+        eval_dataset, batch_size=batch_size*2, shuffle=True, collate_fn=collate_seqbatch)
     describe_dataloader(eval_dataloader, title="Eval DataLoader Summary")
     train_dataloader, eval_dataloader = accelerator.prepare(
         train_dataloader, eval_dataloader
@@ -329,20 +346,11 @@ def train(
     # load rq-vae tokenizer
     if use_image_features and feature_combination_mode == "concat":
         vae_input_dim = vae_input_dim * 2
-    tokenizer = SemanticIdTokenizer(
-        input_dim=vae_input_dim,
-        hidden_dims=vae_hidden_dims,
-        output_dim=vae_embed_dim,
+    # Use PqVaeTokenizer for hierarchical PQ-VAE
+    tokenizer = PqVaeTokenizer(
+        pqvae_weights_path=pretrained_rqvae_path,
         codebook_size=vae_codebook_size,
-        n_layers=vae_n_layers,
-        n_cat_feats=vae_n_cat_feats,
-        rqvae_weights_path=pretrained_rqvae_path,
-        rqvae_codebook_normalize=vae_codebook_normalize,
-        rqvae_sim_vq=vae_sim_vq,
-        use_cross_attn=use_rqvae_cross_attn,
-        attn_heads=attn_heads,
-        # use_projection_head=False, 
-        mixed_precision_type=mixed_precision_type,
+        num_codebooks=vae_n_layers,
     )
     tokenizer = accelerator.prepare(tokenizer)
     tokenizer.precompute_corpus_ids(item_dataset)
