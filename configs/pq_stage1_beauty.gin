@@ -23,7 +23,7 @@ train.force_dataset_process=False
 # ========================================
 train.iterations=50000
 train.batch_size=512
-train.learning_rate=1e-3
+train.learning_rate=1e-4
 train.weight_decay=0.01
 
 # Logging

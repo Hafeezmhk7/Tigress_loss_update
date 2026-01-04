@@ -101,60 +101,43 @@ class Quantize(nn.Module):
     def get_item_embeddings(self, item_ids) -> Tensor:
         return self.out_proj(self.embedding(item_ids))
 
-    def forward(self, x, temperature) -> QuantizeOutput:
-        assert x.shape[-1] == self.embed_dim
-
-        if self.do_kmeans_init and not self.kmeans_initted:
-            self._kmeans_init(x=x)
-
-        codebook = self.out_proj(self.embedding.weight)
-
-        if self.distance_mode == QuantizeDistance.L2:
-            dist = (
-                (x**2).sum(axis=1, keepdim=True)
-                + (codebook.T**2).sum(axis=0, keepdim=True)
-                - 2 * x @ codebook.T
+    def forward(self, x, temperature=None):
+        """
+        Forward pass with optional temperature for Gumbel-Softmax.
+        """
+        if temperature is not None and temperature > 0:
+            # Compute distances and soft assignments
+            distances = torch.cdist(x, self.embedding.weight, p=2.0)  # [B, codebook_size]
+            logits = -distances / temperature
+            soft_codes = F.softmax(logits, dim=-1)  # [B, codebook_size]
+            
+            # Soft quantization: weighted sum
+            quantized = torch.matmul(soft_codes, self.embedding.weight)  # [B, D]
+            
+            # Hard codes for metrics (not used in gradient)
+            codes = torch.argmin(distances, dim=-1)  # [B]
+            
+            # ✅ CORRECT FIX: Use mean reduction everywhere
+            # Codebook loss: bring codebook closer to encoder outputs
+            codebook_loss = F.mse_loss(quantized, x.detach(), reduction='mean')
+            
+            # Commitment loss: bring encoder outputs closer to codebook  
+            commitment_loss = F.mse_loss(x, quantized.detach(), reduction='mean')
+            
+            # Combined VQ loss with proper weighting
+            vq_loss = codebook_loss + self.quantize_loss.commitment_weight * commitment_loss
+            
+            # Straight-through estimator for gradients
+            quantized = x + (quantized - x).detach()
+            
+            return QuantizeOutput(
+                embeddings=quantized,
+                ids=codes,
+                loss=vq_loss,  # ✅ Now a proper scalar
             )
-        elif self.distance_mode == QuantizeDistance.COSINE:
-            dist = -(
-                x
-                / x.norm(dim=1, keepdim=True)
-                @ (codebook.T)
-                / codebook.T.norm(dim=0, keepdim=True)
-            )
+        
         else:
-            raise Exception("Unsupported Quantize distance mode.")
-
-        _, ids = (dist.detach()).min(axis=1)
-
-        if self.training:
-            if self.forward_mode == QuantizeForwardMode.GUMBEL_SOFTMAX:
-                weights = gumbel_softmax_sample(
-                    -dist, temperature=temperature, device=self.device
-                )
-                emb = weights @ codebook
-                emb_out = emb
-            elif self.forward_mode == QuantizeForwardMode.STE:
-                emb = self.get_item_embeddings(ids)
-                emb_out = x + (emb - x).detach()
-            elif self.forward_mode == QuantizeForwardMode.ROTATION_TRICK:
-                emb = self.get_item_embeddings(ids)
-                emb_out = efficient_rotation_trick_transform(
-                    x / (x.norm(dim=-1, keepdim=True) + 1e-8),
-                    emb / (emb.norm(dim=-1, keepdim=True) + 1e-8),
-                    x,
-                )
-            else:
-                raise Exception("Unsupported Quantize forward mode.")
-
-            loss = self.quantize_loss(query=x, value=emb)
-
-        else:
-            emb_out = self.get_item_embeddings(ids)
-            loss = self.quantize_loss(query=x, value=emb_out)
-
-        return QuantizeOutput(embeddings=emb_out, ids=ids, loss=loss)
-
+            raise Exception("Unsupported Quantize forward mode.")
 
 class ProductQuantize(nn.Module):
     """

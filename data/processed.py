@@ -231,23 +231,23 @@ class ItemData(Dataset):
 
         # FIX: ItemData.__getitem__ should pass dataset index, not item_ids
 
-    # In data/processed.py, find the __getitem__ method in ItemData class
-    # and modify the patch embeddings call:
+        # In data/processed.py, find the __getitem__ method in ItemData class
+        # and modify the patch embeddings call:
 
-# FIX: Handle both single index and batch of indices
+    # FIX: Handle both single index and batch of indices
 
-# In data/processed.py, ItemData.__getitem__ method:
+    # In data/processed.py, ItemData.__getitem__ method:
 
-    # SIMPLE FIX: Convert idx to tensor before using for patch embeddings
+        # SIMPLE FIX: Convert idx to tensor before using for patch embeddings
 
-# # In data/processed.py, around line 255, change:
+    # # In data/processed.py, around line 255, change:
 
-# # ❌ BEFORE (BROKEN):
-# text_patches, text_masks = self.get_patch_embeddings(idx)  # idx might be a list!
+    # # ❌ BEFORE (BROKEN):
+    # text_patches, text_masks = self.get_patch_embeddings(idx)  # idx might be a list!
 
-# # ✅ AFTER (FIXED):
-# idx_tensor = torch.tensor(idx) if isinstance(idx, (list, int)) else idx
-# text_patches, text_masks = self.get_patch_embeddings(idx_tensor)
+    # # ✅ AFTER (FIXED):
+    # idx_tensor = torch.tensor(idx) if isinstance(idx, (list, int)) else idx
+    # text_patches, text_masks = self.get_patch_embeddings(idx_tensor)
 
 
     # FULL CONTEXT (around line 245-260):
@@ -258,12 +258,17 @@ class ItemData(Dataset):
         )
         x = self.item_data[idx, :768]
         x_image = None
-        x_brand_id = torch.Tensor(self.item_brand_id[idx])
+        x_brand_id = torch.tensor([self.item_brand_id[idx]])  # ✅ FIX: Ensure it's always [1]
         
-        # ✅ FIX: Convert idx to tensor if it's a list or int
+        # ✅ FIX: Get patch embeddings for single item
         if hasattr(self, 'patch_processor') and self.patch_processor is not None:
-            idx_tensor = torch.tensor(idx) if isinstance(idx, (list, int)) else idx
+            idx_tensor = torch.tensor([idx]) if isinstance(idx, int) else torch.tensor(idx)
             text_patches, text_masks = self.get_patch_embeddings(idx_tensor)
+            # ✅ CRITICAL: Squeeze batch dimension for single items
+            if text_patches is not None and text_patches.dim() > 2:
+                text_patches = text_patches.squeeze(0)  # [1, 77, 1024] -> [77, 1024]
+            if text_masks is not None and text_masks.dim() > 1:
+                text_masks = text_masks.squeeze(0)  # [1, 77] -> [77]
         else:
             text_patches = None
             text_masks = None
@@ -281,7 +286,6 @@ class ItemData(Dataset):
             text_patches=text_patches,
             text_masks=text_masks,
         )
-
 
 # WHY THIS WORKS:
 # - idx can be: int, list, or Tensor

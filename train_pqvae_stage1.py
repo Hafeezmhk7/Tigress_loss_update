@@ -26,6 +26,13 @@ from tqdm import tqdm
 from rich.logging import RichHandler
 import logging
 
+# Fix for CUDA multiprocessing in DataLoader
+import multiprocessing
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass  # Already set
+
 # Setup logging
 logger = logging.getLogger("recsys_logger")
 logger.setLevel(logging.INFO)
@@ -35,6 +42,38 @@ if not logger.hasHandlers():
     logger.addHandler(handler)
     logger.propagate = False
 
+def item_collate_fn(batch):
+    """
+    Custom collate function for ItemData that returns SeqBatch.
+    Uses actual SeqBatch field names from data/schemas.py
+    """
+    import torch
+    from data.schemas import SeqBatch
+    
+    # Get field names from the first item's namedtuple
+    field_names = batch[0]._fields
+    
+    # Collect values for each field
+    field_values = {field: [] for field in field_names}
+    
+    for item in batch:
+        for field in field_names:
+            value = getattr(item, field)
+            if value is not None:
+                field_values[field].append(value)
+    
+    # Stack tensors for each field
+    batched_fields = {}
+    for field, values in field_values.items():
+        if values:
+            # Stack if we have values
+            batched_fields[field] = torch.stack(values)
+        else:
+            # None if no values
+            batched_fields[field] = None
+    
+    # Return SeqBatch with batched values
+    return SeqBatch(**batched_fields)
 
 def train_iteration(
     model, optimizer, train_dataloader, device, accelerator, 
@@ -190,49 +229,57 @@ def train(
             config=locals(),
         )
     
-    # Load datasets
+    # ===== DATASET CREATION =====
     logger.info("Loading datasets...")
-    
+
+    # Create ItemData for training
     train_dataset = ItemData(
         root=dataset_folder,
         dataset=dataset,
-        train_test_split="train",
         split=dataset_split,
+        train_test_split="train",
         force_process=force_dataset_process,
         use_patch_embeddings=use_patch_embeddings,
         patch_model_name=patch_model_name,
         patch_max_seq_length=patch_max_seq_length,
-        device=device,
     )
-    
+
+    # Create ItemData for evaluation
     eval_dataset = ItemData(
         root=dataset_folder,
         dataset=dataset,
-        train_test_split="eval",
         split=dataset_split,
-        force_process=False,  # Already processed
+        train_test_split="eval",
+        force_process=False,  # Don't reprocess for eval
         use_patch_embeddings=use_patch_embeddings,
         patch_model_name=patch_model_name,
         patch_max_seq_length=patch_max_seq_length,
-        device=device,
     )
-    
+
+    logger.info(f"✓ Train items: {len(train_dataset)}")
+    logger.info(f"✓ Eval items: {len(eval_dataset)}")
+
+    # ===== DATALOADER CREATION =====
     train_dataloader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
+        train_dataset,
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=0,  # IMPORTANT: Keep at 0 to avoid CUDA multiprocessing issues
+        collate_fn=item_collate_fn,
         pin_memory=True,
     )
-    train_dataloader = cycle(train_dataloader)
-    
+
     eval_dataloader = DataLoader(
         eval_dataset,
-        batch_size=batch_size * 2,
+        batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=0,  # IMPORTANT: Keep at 0
+        collate_fn=item_collate_fn,
         pin_memory=True,
     )
+
+    # Wrap with cycle for infinite iteration
+    train_dataloader = cycle(train_dataloader)
     
     train_dataloader, eval_dataloader = accelerator.prepare(
         train_dataloader, eval_dataloader

@@ -2,7 +2,7 @@ from torch import nn
 from torch import Tensor
 import torch
 import torch.nn.functional as F
-from typing import List
+from typing import List, Dict, Optional, Tuple
 
 
 class ReconstructionLoss(nn.Module):
